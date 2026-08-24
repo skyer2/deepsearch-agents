@@ -1,0 +1,68 @@
+name: Harness Eval Regression
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  eval-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Harness unit tests
+        run: |
+          uv run python tests/test_harness_phase1.py
+          uv run python tests/test_harness_phase4.py
+          uv run python tests/test_mcp_tavily_server.py
+          uv run python tests/test_harness_hitl.py
+
+      - name: Eval dry-run smoke
+        run: uv run python tests/eval/test_eval_dry_run.py
+
+      - name: Phase 9 observability tests
+        run: uv run python tests/test_harness_phase9.py
+
+      - name: Phase 10 tools/MCP tests
+        run: uv run python tests/test_harness_phase10_tools.py
+
+      - name: Phase 11 context tests
+        run: uv run python tests/test_harness_phase11_context.py
+
+      - name: Phase 12 memory tests
+        run: uv run python tests/test_harness_phase12_memory.py
+
+      - name: Phase 13 harness guardrail tests
+        run: uv run python tests/test_harness_phase13_guardrails.py
+
+      - name: Phase 14 planner tests
+        run: uv run python tests/test_harness_phase14_planner.py
+
+      - name: Eval regression vs baseline
+        run: |
+          uv run python tests/eval/run_eval.py \
+            --dry-run \
+            --baseline tests/eval/results/baseline.json \
+            --fail-on-regression
+
+      - name: Upload eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: tests/eval/results/eval_report_*.json
+          if-no-files-found: ignore

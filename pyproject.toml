@@ -29,7 +29,12 @@ dependencies = [
     "tavily-python==0.7.24",
     "typing-extensions>=4.5.0",
     "uvicorn[standard]>=0.20.0",
+    "langfuse>=2.0.0",
+    "mcp>=1.9.0",
 ]
 
 [tool.uv]
 package = false
+
+[project.optional-dependencies]
+memory = ["mem0ai>=0.1.0"]

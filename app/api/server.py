@@ -27,8 +27,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from app.agent.harness.hitl import hitl_coordinator
 from app.agent.main_agent import run_deep_agent
+from app.api.eval_routes import router as eval_router
+from app.api.harness_routes import router as harness_router
+from app.api.health import collect_health
+from app.api.memory_routes import router as memory_router
+from app.api.metrics_routes import router as metrics_router
 from app.api.monitor import manager
+from app.api.tools_routes import router as tools_router
+from app.api.trace_routes import router as trace_routes
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -49,6 +57,12 @@ current_dir = Path(__file__).resolve().parent
 project_root = current_dir.parent
 
 app = FastAPI(title="DeepAgents API", lifespan=lifespan)
+app.include_router(eval_router)
+app.include_router(harness_router)
+app.include_router(trace_routes)
+app.include_router(metrics_router)
+app.include_router(tools_router)
+app.include_router(memory_router)
 
 # 保存 thread_id -> 后台 Agent 任务，用于同一会话任务替换和主动取消
 active_tasks: dict[str, asyncio.Task] = {}
@@ -78,6 +92,15 @@ class TaskRequest(BaseModel):
     thread_id: str = None
 
 
+class HitlDecision(BaseModel):
+    type: str
+    edited_action: dict | None = None
+
+
+class HitlResumeRequest(BaseModel):
+    decisions: List[HitlDecision]
+
+
 def _forget_task(thread_id: str, task: asyncio.Task) -> None:
     """
     清理已结束任务的登记关系。
@@ -87,6 +110,12 @@ def _forget_task(thread_id: str, task: asyncio.Task) -> None:
     """
     if active_tasks.get(thread_id) is task:
         active_tasks.pop(thread_id, None)
+
+
+@app.get("/health")
+async def health_check():
+    """Harness 健康检查：LLM / MySQL / Tavily / RAGFlow / Langfuse / Mem0。"""
+    return await collect_health()
 
 
 @app.post("/api/task")
@@ -110,6 +139,29 @@ async def run_task(request: TaskRequest):
     task.add_done_callback(lambda finished_task: _forget_task(thread_id, finished_task))
 
     return {"status": "started", "thread_id": thread_id}
+
+
+@app.get("/api/task/{thread_id}/hitl/pending")
+async def get_hitl_pending(thread_id: str):
+    """查询当前会话是否有待审批的 HITL 中断。"""
+    pending = hitl_coordinator.get_pending(thread_id)
+    if not pending:
+        raise HTTPException(status_code=404, detail="当前无待审批动作")
+    return {"thread_id": thread_id, "pending": pending}
+
+
+@app.post("/api/task/{thread_id}/resume")
+async def resume_task(thread_id: str, request: HitlResumeRequest):
+    """
+    HITL 人工审批恢复。
+
+    decisions 顺序须与 action_requests 一致，每项 type 为 approve / reject / edit。
+    """
+    decisions = [item.model_dump(exclude_none=True) for item in request.decisions]
+    accepted = hitl_coordinator.submit_decisions(thread_id, decisions)
+    if not accepted:
+        raise HTTPException(status_code=404, detail="未找到待恢复的 HITL 会话")
+    return {"status": "resumed", "thread_id": thread_id, "decisions": decisions}
 
 
 @app.post("/api/task/{thread_id}/cancel")

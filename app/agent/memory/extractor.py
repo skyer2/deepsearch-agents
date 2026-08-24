@@ -1,0 +1,192 @@
+"""
+【Phase 15】记忆事实提取 — 类型化 fact + 步内增量 + finalize 批量。
+"""
+
+from __future__ import annotations
+
+from typing import Any, Optional
+
+from app.agent.memory.models import MemoryType, MemoryWriteRequest, WriteSource
+
+EXTRACT_PROMPT = """从以下 Agent 任务结果中提取 3-5 条可长期保存的关键事实。
+要求：
+1. 每条事实独立、具体、可复用
+2. 不要泛泛而谈，保留主题、结论、数据要点
+3. 每行格式：类型|事实内容
+   类型只能是：semantic / episodic / preference / procedural
+4. 不要编号
+
+任务结果：
+{content}
+"""
+
+STEP_EXTRACT_HINTS = {
+    "network_search": MemoryType.EPISODIC,
+    "database_query": MemoryType.SEMANTIC,
+    "knowledge_base": MemoryType.SEMANTIC,
+    "file_read": MemoryType.EPISODIC,
+}
+
+
+class MemoryExtractor:
+    def __init__(self, model: Any = None):
+        self.model = model
+
+    async def extract_writes(
+        self,
+        content: str,
+        *,
+        max_facts: int = 5,
+        write_source: WriteSource = WriteSource.FINALIZE,
+        task: str = "",
+        topic: str = "",
+        session_id: str = "",
+    ) -> list[MemoryWriteRequest]:
+        if not content.strip():
+            return []
+        from app.agent.memory.policy import get_memory_policy
+
+        policy = get_memory_policy()
+        cap = min(max_facts, policy.max_facts_per_remember)
+
+        if self.model is None:
+            raw_facts = self._heuristic_extract(content, cap)
+            return [
+                MemoryWriteRequest(
+                    fact=f,
+                    memory_type=MemoryType.SEMANTIC,
+                    write_source=write_source,
+                    task=task,
+                    topic=topic,
+                    session_id=session_id,
+                    confidence=0.75,
+                )
+                for f in raw_facts
+            ]
+
+        try:
+            from app.agent.harness.usage_tracker import tracked_ainvoke
+
+            response = await tracked_ainvoke(
+                self.model,
+                EXTRACT_PROMPT.format(content=content[:8000]),
+                session_id=session_id,
+                phase="memory_extract",
+            )
+            text = getattr(response, "content", str(response))
+            if isinstance(text, list):
+                text = "\n".join(str(item) for item in text)
+            return self._parse_typed_lines(
+                str(text),
+                cap=cap,
+                write_source=write_source,
+                task=task,
+                topic=topic,
+                session_id=session_id,
+            )
+        except Exception as exc:
+            print(f"[MemoryExtractor] LLM extract failed: {exc}")
+            raw_facts = self._heuristic_extract(content, cap)
+            return [
+                MemoryWriteRequest(
+                    fact=f,
+                    memory_type=MemoryType.SEMANTIC,
+                    write_source=write_source,
+                    task=task,
+                    topic=topic,
+                    session_id=session_id,
+                    confidence=0.7,
+                )
+                for f in raw_facts
+            ]
+
+    async def extract_facts(self, content: str, max_facts: int = 5) -> list[str]:
+        writes = await self.extract_writes(content, max_facts=max_facts)
+        return [w.fact for w in writes]
+
+    def extract_step_writes(
+        self,
+        content: str,
+        step_type: str,
+        *,
+        max_facts: int = 2,
+        session_id: str = "",
+        task: str = "",
+    ) -> list[MemoryWriteRequest]:
+        if not content.strip():
+            return []
+        from app.agent.memory.policy import get_memory_policy
+
+        policy = get_memory_policy()
+        cap = min(max_facts, 2)
+        memory_type = STEP_EXTRACT_HINTS.get(step_type, MemoryType.EPISODIC)
+        sentences = self._heuristic_extract(content, cap * 2)
+        writes: list[MemoryWriteRequest] = []
+        for sentence in sentences[:cap]:
+            if len(sentence.strip()) < policy.min_fact_chars:
+                continue
+            writes.append(
+                MemoryWriteRequest(
+                    fact=sentence.strip(),
+                    memory_type=memory_type,
+                    write_source=WriteSource.STEP_INCREMENTAL,
+                    session_id=session_id,
+                    task=task,
+                    confidence=0.65,
+                    metadata={"step_type": step_type},
+                )
+            )
+        return writes
+
+    def _parse_typed_lines(
+        self,
+        text: str,
+        *,
+        cap: int,
+        write_source: WriteSource,
+        task: str,
+        topic: str,
+        session_id: str,
+    ) -> list[MemoryWriteRequest]:
+        from app.agent.memory.policy import get_memory_policy
+
+        policy = get_memory_policy()
+        writes: list[MemoryWriteRequest] = []
+        for line in text.splitlines():
+            line = line.strip("-• ").strip()
+            if not line:
+                continue
+            memory_type = MemoryType.SEMANTIC
+            fact = line
+            if "|" in line:
+                type_part, fact_part = line.split("|", 1)
+                type_part = type_part.strip().lower()
+                fact = fact_part.strip()
+                try:
+                    memory_type = MemoryType(type_part)
+                except ValueError:
+                    memory_type = MemoryType.SEMANTIC
+            if len(fact) < policy.min_fact_chars:
+                continue
+            writes.append(
+                MemoryWriteRequest(
+                    fact=fact,
+                    memory_type=memory_type,
+                    write_source=write_source,
+                    task=task,
+                    topic=topic,
+                    session_id=session_id,
+                    confidence=0.85,
+                )
+            )
+            if len(writes) >= cap:
+                break
+        return writes
+
+    def _heuristic_extract(self, content: str, max_facts: int) -> list[str]:
+        sentences = [
+            s.strip()
+            for s in content.replace("\n", "。").split("。")
+            if len(s.strip()) >= 20
+        ]
+        return sentences[:max_facts]

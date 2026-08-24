@@ -1,8 +1,8 @@
 """
 大模型初始化模块
 
-负责从 .env 中读取模型配置，并创建项目统一复用的模型对象
-后续主智能体和子智能体都从这里导入 model，避免在多个文件里重复加载环境变量
+负责从 .env 中读取模型配置，并创建项目统一复用的模型对象。
+【Phase 2 新增】compression_model 供 Harness 上下文压缩使用（默认 qwen-turbo）。
 """
 
 import os
@@ -10,11 +10,29 @@ import os
 from dotenv import find_dotenv, load_dotenv
 from langchain.chat_models import init_chat_model
 
-# find_dotenv 会从当前目录向上查找 .env，适合脚本和 Web 服务从不同入口启动的场景
 load_dotenv(find_dotenv())
 
-# 使用 OpenAI 兼容协议接入模型；具体模型名由 .env 中的 LLM_QWEN_MAX 控制
+_llm_timeout = float(os.getenv("LLM_TIMEOUT_SEC", "120"))
+_supervisor_temperature = float(os.getenv("HARNESS_SUPERVISOR_TEMPERATURE", "0.1"))
+
 model = init_chat_model(
     model=os.getenv("LLM_QWEN_MAX"),
     model_provider="openai",
+    timeout=_llm_timeout,
+    temperature=_supervisor_temperature,
 )
+
+_compression_model_name = os.getenv("LLM_COMPRESSION_MODEL", "qwen-turbo")
+_compression_enabled = os.getenv("HARNESS_LLM_COMPRESSION", "true").lower() != "false"
+
+compression_model = None
+if _compression_enabled:
+    try:
+        compression_model = init_chat_model(
+            model=_compression_model_name,
+            model_provider="openai",
+            timeout=_llm_timeout,
+        )
+    except Exception as exc:
+        print(f"[LLM] compression_model init failed, will use truncate: {exc}")
+

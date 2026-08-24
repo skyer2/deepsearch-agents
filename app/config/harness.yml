@@ -1,0 +1,123 @@
+harness:
+  version: "1.0.0-harness"
+  max_retries: 2
+
+  compression:
+    enabled: true
+    max_tokens: 500
+    threshold_chars: 2000        # 【Phase 11】超过此字符数触发压缩
+    model: "qwen-turbo"
+
+  # 【Phase 11】上下文工程 — 分层预算 + prior 回灌 + 外部内容隔离
+  context:
+    max_step_message_tokens: 12000   # 单步 user message token 上限（估算）
+    prior_results_max_steps: 5       # 回灌最近 N 步摘要
+    prior_snippet_max_chars: 400
+    wrap_untrusted_external: true    # 检索结果用 <untrusted> 包裹
+    layer_budget_log_enabled: true   # 记录各层 token 估算
+
+  memory:
+    provider: "sqlite"         # sqlite | local | mem0
+    enabled: true
+    recall_top_k: 5
+    ttl_days: 90               # 记忆过期天数，0=不过期
+    max_facts_per_remember: 5
+    min_fact_chars: 12
+    wrap_untrusted: true       # recall 注入时 <untrusted> 包裹，防注入
+    embedding_enabled: true    # 【Phase 15】Hybrid Recall 语义向量
+    recall_keyword_weight: 0.4
+    recall_embedding_weight: 0.6
+    merge_jaccard_threshold: 0.55
+    merge_embedding_threshold: 0.88
+    pii_redact_enabled: true
+    step_incremental_enabled: true   # 检索步成功后步内增量写入
+    remember_on_partial: false       # 仅 success 时 finalize 写入
+
+  validation:
+    strict_mode: false         # true = step warning 也算失败
+
+  observability:
+    langfuse_enabled: true
+    jsonl_log_enabled: true
+    jsonl_log_dir: "logs/traces"
+    metrics_enabled: true              # 【Phase 9】在线指标聚合
+    metrics_window_hours: 168          # 默认 7 天滚动窗口
+    prometheus_enabled: true           # GET /api/metrics/prometheus
+    usage_tracking_enabled: true       # 【Phase 17】LLM token/成本追踪
+
+  budget:
+    max_total_tokens: 100000
+    max_tool_calls: 20
+    max_run_sec: 600             # 【Phase 13】整任务墙钟时限（秒）
+    max_replan_count: 3          # 【Phase 13】动态重规划上限
+    max_plan_steps: 12           # 【Phase 13】计划步数上限，防 replan 膨胀
+
+  mcp:
+    enabled: false               # true = Tavily/MySQL/RAGFlow/Files 均走 MCP Gateway
+    tavily_enabled: false        # 可单独覆盖 enabled
+    mysql_enabled: false
+    ragflow_enabled: false
+    files_enabled: false         # 会话文件 Resources + 异步 PDF
+    transport: "stdio"            # 预留 streamable-http
+    pool_enabled: true            # 【Phase 16】常驻连接池，避免每次起子进程
+    sync_on_startup: true         # 【Phase 16】list_tools 同步 Registry schema
+    tasks_enabled: true           # 【Phase 16】长任务 MCP Tasks + Harness 轮询
+    call_timeout_sec: 30
+    max_retries: 1
+    gateway_rate_limit_per_minute: 120
+    gateway_oauth_token: ""       # 非空时要求 HARNESS_MCP_GATEWAY_TOKEN 匹配
+
+  # 【Phase 10】工具网关 — fail-closed + SQL 白名单（LangChain/MCP 共用 db_core）
+  tools:
+    fail_closed: true
+    sql_select_only: true
+    enforce_step_policy: true    # Registry 步级工具白名单（文档+Gateway 校验）
+
+  hitl:
+    enabled: true
+    timeout_sec: 600
+    plan_review_enabled: true       # 【Phase 6】多意图任务计划审批
+    allow_edit: true                # 【Phase 6】HITL Edit-in-the-Loop
+    allow_replan: true              # 【Phase 6】动态重规划
+    interrupt_on:
+      generate_markdown: true
+      convert_md_to_pdf: true
+      read_file_content: false
+    step_gate_types:
+      - database_query
+
+  citations:                          # 【Phase 6】Citation-First Research
+    enabled: true
+    min_coverage_rate: 0.2
+
+  eval:
+    trajectory_min_similarity: 0.6
+    intent_deliverable_min_accuracy: 0.9     # 【Phase 14】交付物识别最低准确率
+    plan_validation_min_rate: 1.0            # 【Phase 14】Plan 校验通过率
+    heuristic_judge_enabled: true      # 【Phase 9】live eval 启发式报告 Judge
+    heuristic_judge_min_score: 0.6
+    llm_judge_enabled: false           # 可选 LLM Judge（默认关）
+    structured_output_min_rate: 0.8    # JCR 回归告警阈值参考
+
+  # 【Phase 7】多 Agent 编排 — 监督者 + 工人协作增强
+  orchestration:
+    parallel_retrieval_enabled: true    # 无依赖检索步 fan-out
+    max_parallel_workers: 3             # 并行工人上限
+    step_timeout_sec: 120                 # 单步执行超时（含子 Agent）
+    enforce_subagent_binding: true        # 计划绑定 + 禁止越权工具
+    step_checkpoint_enabled: true         # 步级 checkpoint 持久化
+    resume_checkpoint: true               # 同 session 同任务指纹时从 checkpoint 续跑
+    supervisor_temperature: 0.1           # 监督者低温，降低路由波动
+    structured_output_retry: true          # 【Phase 8】工人非 JSON 时自动重试一次
+    require_structured_worker_output: true # 【Phase 8】重试后仍非 JSON 则 step 失败
+    synthesis_use_evidence_digest: true     # 【Phase 8】写报告用 facts 证据_digest
+
+  # 【Phase 14】工业级 Planner：结构化槽位 + 默认 LLM + 澄清 + Plan 审批
+  planner:
+    llm_enabled: true                    # 默认 LLM Planner（失败回退规则）
+    llm_min_confidence: 0.5
+    llm_confirm_enabled: true             # 向后兼容别名
+    llm_confirm_min_confidence: 0.5
+    clarification_enabled: true            # 低置信/歧义 → HITL 澄清
+    clarification_auto_resolve: true       # 无 HITL 响应/单测时自动保守解析
+    plan_review_min_confidence: 0.75       # 低于此阈值触发计划审批

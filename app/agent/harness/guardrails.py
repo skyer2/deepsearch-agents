@@ -1,0 +1,107 @@
+"""
+【Phase 13】Harness 运行时护栏
+
+企业生产：显式 Kill Switch — 工具次数 / token / 墙钟时限 / 重规划次数 / 计划步数。
+默认 fail-closed：任一超限立即 ABORT，保留已完成步结果做 partial 交付。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from app.agent.harness.state import LoopState
+    from app.config.loader import HarnessConfig
+
+
+class AbortReason:
+    BUDGET_TOOL_CALLS = "budget_tool_calls"
+    BUDGET_TOKENS = "budget_tokens"
+    DEADLINE = "deadline_exceeded"
+    MAX_REPLAN = "max_replan"
+    MAX_PLAN_STEPS = "max_plan_steps"
+    CANCELLED = "cancelled"
+    ERROR = "error"
+
+
+@dataclass
+class GuardrailDecision:
+    abort: bool
+    reason: str = ""
+    message: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "abort": self.abort,
+            "reason": self.reason,
+            "message": self.message,
+        }
+
+
+def evaluate_run_guardrails(
+    state: "LoopState",
+    config: "HarnessConfig",
+    *,
+    elapsed_sec: float,
+    estimated_tokens: int,
+) -> GuardrailDecision:
+    """每步执行前评估护栏。先命中先返回。"""
+    max_tools = int(config.max_tool_calls)
+    if state.tool_calls_count >= max_tools:
+        return GuardrailDecision(
+            abort=True,
+            reason=AbortReason.BUDGET_TOOL_CALLS,
+            message=f"工具调用达到上限 {max_tools}",
+        )
+
+    max_tokens = int(config.max_total_tokens)
+    if estimated_tokens >= max_tokens:
+        return GuardrailDecision(
+            abort=True,
+            reason=AbortReason.BUDGET_TOKENS,
+            message=f"估算 token 达到上限 {max_tokens}",
+        )
+
+    max_run_sec = int(getattr(config, "max_run_sec", 0) or 0)
+    if max_run_sec > 0 and elapsed_sec >= max_run_sec:
+        return GuardrailDecision(
+            abort=True,
+            reason=AbortReason.DEADLINE,
+            message=f"任务墙钟时限 {max_run_sec}s 已到",
+        )
+
+    max_replan = int(getattr(config, "max_replan_count", 0) or 0)
+    if max_replan > 0 and state.replan_count >= max_replan:
+        return GuardrailDecision(
+            abort=True,
+            reason=AbortReason.MAX_REPLAN,
+            message=f"动态重规划达到上限 {max_replan}",
+        )
+
+    max_steps = int(getattr(config, "max_plan_steps", 0) or 0)
+    plan_len = len(state.plan.steps) if state.plan else 0
+    if max_steps > 0 and plan_len > max_steps:
+        return GuardrailDecision(
+            abort=True,
+            reason=AbortReason.MAX_PLAN_STEPS,
+            message=f"计划步数 {plan_len} 超过上限 {max_steps}",
+        )
+
+    return GuardrailDecision(abort=False)
+
+
+def can_replan(state: "LoopState", config: "HarnessConfig") -> bool:
+    """是否允许再插入动态重规划步。"""
+    if not getattr(config, "hitl_allow_replan", True):
+        return False
+    if state.retry_count >= state.max_retries:
+        return False
+    max_replan = int(getattr(config, "max_replan_count", 0) or 0)
+    if max_replan > 0 and state.replan_count >= max_replan:
+        return False
+    max_steps = int(getattr(config, "max_plan_steps", 0) or 0)
+    plan_len = len(state.plan.steps) if state.plan else 0
+    if max_steps > 0 and plan_len >= max_steps:
+        return False
+    return True

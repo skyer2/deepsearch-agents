@@ -1,0 +1,144 @@
+"""
+结果校验
+
+支持 per-step 校验与 finalize 终态校验。
+【Phase 6】增加 Citation-First 引用覆盖率校验。
+"""
+
+from pathlib import Path
+from typing import TYPE_CHECKING, Optional
+
+from app.agent.harness.state import (
+    ExecutionPlan,
+    LoopState,
+    PlanStep,
+    StepResult,
+    ValidationOutcome,
+)
+
+if TYPE_CHECKING:
+    from app.agent.harness.citations import CitationManager
+
+ERROR_KEYWORDS = ("异常", "错误", "失败", "查询出现异常", "没有可用的表")
+SQL_EMPTY_KEYWORDS = ("没有可用的", "0 条", "空", "未找到")
+
+
+class ResultValidator:
+    def validate_step(
+        self,
+        step: PlanStep,
+        result: StepResult,
+        session_dir: Path,
+        state: LoopState,
+    ) -> ValidationOutcome:
+        content = result.compressed_content or result.content or ""
+
+        if result.metadata.get("unauthorized_tools"):
+            return ValidationOutcome(False, "unauthorized_tool", "error")
+        if "tool_gateway" in (result.content or ""):
+            return ValidationOutcome(False, "tool_gateway_denied", "error")
+
+        if result.metadata.get("step_timeout"):
+            return ValidationOutcome(False, "step_timeout", "error")
+
+        if result.metadata.get("structured_ok") is False:
+            code = str(result.metadata.get("error_code") or "worker_failed")
+            return ValidationOutcome(False, code, "error")
+
+        if result.metadata.get("invalid_structured_output"):
+            return ValidationOutcome(False, "invalid_structured_output", "error")
+
+        if any(kw in content for kw in ERROR_KEYWORDS):
+            return ValidationOutcome(False, "no_error", "error")
+
+        if step.step_type == "network_search":
+            if len(content) < 120:
+                return ValidationOutcome(False, "search_too_short", "error")
+            assistants_seen = list(
+                result.metadata.get("step_assistants_called") or state.assistants_called
+            )
+            if step.subagent and step.subagent not in assistants_seen:
+                return ValidationOutcome(False, "wrong_subagent", "error")
+
+        if step.step_type == "database_query":
+            if any(kw in content for kw in SQL_EMPTY_KEYWORDS):
+                return ValidationOutcome(False, "sql_empty", "error")
+            assistants_seen = list(
+                result.metadata.get("step_assistants_called") or state.assistants_called
+            )
+            if step.subagent and step.subagent not in assistants_seen:
+                return ValidationOutcome(False, "wrong_subagent", "error")
+
+        if step.step_type == "knowledge_base":
+            if len(content) < 80:
+                return ValidationOutcome(False, "search_too_short", "error")
+
+        if step.step_type in ("generate_markdown", "summarize"):
+            if not content.strip():
+                return ValidationOutcome(False, "no_content", "error")
+
+        if step.step_type == "generate_markdown":
+            md_files = list(session_dir.glob("*.md"))
+            if not md_files:
+                return ValidationOutcome(False, "no_file_generated", "warning")
+
+        if step.step_type == "convert_pdf":
+            pdf_files = list(session_dir.glob("*.pdf"))
+            if not pdf_files:
+                return ValidationOutcome(False, "no_file_generated", "error")
+
+        return ValidationOutcome(True)
+
+    def validate_finalize(
+        self,
+        state: LoopState,
+        session_dir: Path,
+        citation_manager: Optional["CitationManager"] = None,
+        min_citation_coverage: float = 0.2,
+    ) -> ValidationOutcome:
+        intent = state.intent
+        content = state.final_content or ""
+
+        if not content.strip() and not state.step_results:
+            return ValidationOutcome(False, "no_content", "error")
+
+        if any(kw in content for kw in ERROR_KEYWORDS):
+            return ValidationOutcome(False, "no_error", "error")
+
+        if intent and intent.deliverable in ("md", "pdf"):
+            md_files = list(session_dir.glob("*.md"))
+            if not md_files:
+                return ValidationOutcome(False, "no_file_generated", "error")
+
+        if intent and intent.deliverable == "pdf":
+            pdf_files = list(session_dir.glob("*.pdf"))
+            if not pdf_files:
+                return ValidationOutcome(False, "no_file_generated", "error")
+
+        coverage = self.validate_plan_coverage(state.plan, state.assistants_called)
+        if not coverage.passed:
+            return coverage
+
+        failed_steps = [v for v in state.step_validation_results if not v.get("passed")]
+        if failed_steps and state.metadata.get("strict_validation", False):
+            return ValidationOutcome(False, "step_validation_failed", "error")
+
+        # 【Phase 6】Citation-First finalize 校验
+        if citation_manager is not None and intent and intent.deliverable in ("md", "pdf", "text"):
+            ok, reason = citation_manager.validate_citations(content, min_citation_coverage)
+            if not ok:
+                return ValidationOutcome(False, reason, "warning")
+
+        return ValidationOutcome(True)
+
+    def validate_plan_coverage(
+        self,
+        plan: ExecutionPlan | None,
+        assistants_called: list[str],
+    ) -> ValidationOutcome:
+        if not plan:
+            return ValidationOutcome(True)
+        for step in plan.steps:
+            if step.subagent and step.subagent not in assistants_called:
+                return ValidationOutcome(False, "wrong_subagent", "error")
+        return ValidationOutcome(True)

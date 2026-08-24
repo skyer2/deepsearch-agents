@@ -1,0 +1,224 @@
+"""
+Harness 状态定义
+
+定义显式 Agent Loop 的阶段枚举、计划结构和运行状态，
+供 loop / validator / recovery 等模块共享。
+"""
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any, Literal, Optional
+
+from app.agent.harness.intent_slots import IntentSlots
+
+
+class Phase(str, Enum):
+    UNDERSTAND = "understand"
+    PLAN = "plan"
+    REPLAN = "replan"  # 【Phase 6】动态重规划
+    BUILD_CONTEXT = "build_context"
+    EXECUTE = "execute"
+    PARALLEL_EXECUTE = "parallel_execute"  # 【Phase 7】检索步 fan-out
+    COMPRESS = "compress"
+    VALIDATE = "validate"
+    RECOVER = "recover"
+    FINALIZE = "finalize"
+    ABORT = "abort"
+
+
+class StepStatus(str, Enum):
+    """【Phase 7】计划步状态（权威计划对象）。"""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+@dataclass
+class TaskIntent:
+    """任务理解阶段的结构化输出。"""
+
+    raw_query: str
+    summary: str
+    needs_network: bool = False
+    needs_database: bool = False
+    needs_knowledge_base: bool = False
+    needs_file_read: bool = False
+    deliverable: Literal["text", "md", "pdf"] = "text"
+    keywords: list[str] = field(default_factory=list)
+    # 【Phase 8】混合 Planner 元数据
+    planner_source: Literal["rules", "llm", "rules+llm"] = "rules"
+    intent_confidence: float = 1.0
+    planner_reason: str = ""
+    # 【Phase 14】结构化槽位 + 澄清
+    slots: IntentSlots = field(default_factory=IntentSlots)
+    rule_confidence: float = 1.0
+    ambiguity_flags: list[str] = field(default_factory=list)
+    needs_clarification: bool = False
+    clarification_question: str = ""
+    clarification_resolved: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "raw_query": self.raw_query,
+            "summary": self.summary,
+            "needs_network": self.needs_network,
+            "needs_database": self.needs_database,
+            "needs_knowledge_base": self.needs_knowledge_base,
+            "needs_file_read": self.needs_file_read,
+            "deliverable": self.deliverable,
+            "keywords": list(self.keywords),
+            "planner_source": self.planner_source,
+            "intent_confidence": self.intent_confidence,
+            "planner_reason": self.planner_reason,
+            "slots": self.slots.to_dict(),
+            "rule_confidence": self.rule_confidence,
+            "ambiguity_flags": list(self.ambiguity_flags),
+            "needs_clarification": self.needs_clarification,
+            "clarification_question": self.clarification_question,
+            "clarification_resolved": self.clarification_resolved,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "TaskIntent":
+        deliverable = str(data.get("deliverable", "text"))
+        if deliverable not in {"text", "md", "pdf"}:
+            deliverable = "text"
+        return cls(
+            raw_query=str(data.get("raw_query", "")),
+            summary=str(data.get("summary", "")),
+            needs_network=bool(data.get("needs_network", False)),
+            needs_database=bool(data.get("needs_database", False)),
+            needs_knowledge_base=bool(data.get("needs_knowledge_base", False)),
+            needs_file_read=bool(data.get("needs_file_read", False)),
+            deliverable=deliverable,  # type: ignore[arg-type]
+            keywords=[str(k) for k in (data.get("keywords") or [])],
+            planner_source=data.get("planner_source", "rules"),  # type: ignore[arg-type]
+            intent_confidence=float(data.get("intent_confidence", 1.0) or 1.0),
+            planner_reason=str(data.get("planner_reason", "")),
+            slots=IntentSlots.from_dict(data.get("slots")),
+            rule_confidence=float(data.get("rule_confidence", 1.0) or 1.0),
+            ambiguity_flags=[str(f) for f in (data.get("ambiguity_flags") or [])],
+            needs_clarification=bool(data.get("needs_clarification", False)),
+            clarification_question=str(data.get("clarification_question", "")),
+            clarification_resolved=bool(data.get("clarification_resolved", False)),
+        )
+
+
+@dataclass
+class PlanStep:
+    """执行计划中的单步。"""
+
+    step_type: str
+    description: str
+    subagent: Optional[str] = None
+    metadata: dict[str, Any] = field(default_factory=dict)  # 【Phase 6】HITL edit / replan 元数据
+
+
+@dataclass
+class ExecutionPlan:
+    """计划生成阶段的结构化输出。"""
+
+    steps: list[PlanStep] = field(default_factory=list)
+    summary: str = ""
+
+
+@dataclass
+class StepResult:
+    """单步执行结果。"""
+
+    step_type: str
+    content: str
+    compressed_content: Optional[str] = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class PhaseEvent:
+    """阶段事件，写入 trace 供评测使用。"""
+
+    phase: str
+    status: str
+    duration_ms: Optional[int] = None
+    data: dict[str, Any] = field(default_factory=dict)
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+
+
+@dataclass
+class ValidationOutcome:
+    passed: bool
+    reason: str = ""
+    severity: Literal["error", "warning"] = "error"
+
+
+@dataclass
+class LoopState:
+    """Harness 运行时的完整状态。"""
+
+    session_id: str
+    phase: Phase = Phase.UNDERSTAND
+    intent: Optional[TaskIntent] = None
+    plan: Optional[ExecutionPlan] = None
+    step_index: int = 0
+    step_results: list[StepResult] = field(default_factory=list)
+    retry_count: int = 0
+    max_retries: int = 2
+    trace: list[PhaseEvent] = field(default_factory=list)
+    final_content: str = ""
+    assistants_called: list[str] = field(default_factory=list)
+    recovery_hints: list[str] = field(default_factory=list)
+    memory_facts: list[str] = field(default_factory=list)
+    memory_records: list[Any] = field(default_factory=list)
+    memory_recalled: bool = False
+    memory_user_id: str = ""
+    memory_tenant_id: str = "default"
+    memory_wrap_untrusted: bool = False
+    tool_calls_count: int = 0
+    step_validation_results: list[dict[str, Any]] = field(default_factory=list)
+    compression_ratios: list[float] = field(default_factory=list)
+    started_at: datetime = field(default_factory=datetime.now)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    # 【Phase 6】Citation-First + Dynamic Re-plan
+    replan_count: int = 0
+    evidence_source_count: int = 0
+    citation_coverage_rate: float = 0.0
+    hallucination_rate: float = 0.0
+    # 【Phase 7】多 Agent 编排
+    completed_step_keys: list[str] = field(default_factory=list)
+    task_fingerprint: str = ""
+    resumed_from_checkpoint: bool = False
+    # 【Phase 9】运行时观测计数（写入 run_summary / Langfuse / metrics API）
+    obs_structured_checks: int = 0
+    obs_structured_passes: int = 0
+    obs_structured_retries: int = 0
+    obs_parallel_batch_count: int = 0
+    obs_parallel_steps_executed: int = 0
+    obs_orchestration_violations: int = 0
+    obs_binding_violations: int = 0
+    obs_unauthorized_tool_hits: int = 0
+    obs_estimated_tokens_saved: int = 0
+    obs_step_message_tokens_peak: int = 0
+    obs_context_budget_trims: int = 0
+    obs_memory_recalled_count: int = 0
+    obs_memory_saved_count: int = 0
+    obs_memory_recall_at_k: float = 0.0
+    obs_memory_embedding_used: bool = False
+    # 【Phase 13】运行时护栏中止
+    abort_reason: str = ""
+    abort_message: str = ""
+
+
+@dataclass
+class HarnessResult:
+    """Harness 执行完成后的返回结构。"""
+
+    session_id: str
+    status: Literal["success", "partial", "failed", "cancelled"]
+    content: str
+    trace: list[PhaseEvent]
+    artifacts: list[str] = field(default_factory=list)
+    retry_count: int = 0
+    metadata: dict[str, Any] = field(default_factory=dict)

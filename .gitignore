@@ -5,7 +5,13 @@
 /tmp
 app/output
 app/updated
-/out-tsc
+app/logs/
+app/memory_data/
+tests/eval/results/eval_report_*.json
+tests/eval/results/eval_comparison_*.md
+tests/eval/results/browsecomp_plus/
+# BrowseComp-Plus 解密 query、answer 与约 3GB 固定语料只保存在本机
+.benchmark_data/
 # Only exists if Bazel was run
 /bazel-out
 

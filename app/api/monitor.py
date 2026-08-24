@@ -135,6 +135,41 @@ class ToolMonitor:
         """报告当前任务工作目录"""
         self._emit("session_created", f"工作目录已创建: {path}", {"path": path})
 
+    def report_phase(
+        self,
+        phase: str,
+        status: str,
+        **data: Any,
+    ) -> None:
+        """报告 Harness 显式 Loop 阶段事件（understand / plan / execute / validate 等）"""
+        status_icon = {"start": "→", "done": "✓", "failed": "✗", "cancelled": "⊗"}.get(
+            status, "·"
+        )
+        self._emit(
+            "phase",
+            f"[{phase}] {status_icon} {status}",
+            {"phase": phase, "status": status, **data},
+        )
+
+    def report_hitl_interrupt(
+        self,
+        session_id: str,
+        action_requests: list[dict[str, Any]],
+        review_configs: list[dict[str, Any]],
+        **extra: Any,
+    ) -> None:
+        """报告 interrupt_on 命中，等待人工审批。"""
+        self._emit(
+            "hitl_interrupt",
+            f"等待人工审批（{len(action_requests)} 个动作）",
+            {
+                "session_id": session_id,
+                "action_requests": action_requests,
+                "review_configs": review_configs,
+                **extra,
+            },
+        )
+
 
 monitor = ToolMonitor()
 

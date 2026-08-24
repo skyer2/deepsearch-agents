@@ -1,20 +1,24 @@
 <div align='center'>
   <h1 style="margin-top: 15px;">「深度研搜」对话式多智能体研究系统</h1>
   <h4><b>deepsearch-agents</b></h4>
-  <p><em>可能是全网最适合用于系统学习 DeepAgents 的多智能体深度研究实战项目，配套系统性文字教程与对应章节分支，带你打通主智能体调度、专家助手分工、多来源检索、文件交付与前后端实时联动全链路</em></p>
+  <p><em>DeepAgents 多智能体深度研搜 + 自研 Agent Harness 运行时层 — 可见、可测、可控，适合 2026 年 Agent / Harness 工程师面试展示</em></p>
 </div>
 
 <div align='center'>
 
 ![AI](https://img.shields.io/badge/AI-Agent-00c853?style=flat)
+![Harness](https://img.shields.io/badge/Agent-Harness-7C3AED?style=flat)
 ![DeepAgents](https://img.shields.io/badge/DeepAgents-0.5.7-1C3C3C.svg)
+![MCP](https://img.shields.io/badge/MCP-stdio-2563EB?style=flat)
+![Eval](https://img.shields.io/badge/Eval-8_metrics-F59E0B?style=flat)
 ![FastAPI](https://img.shields.io/badge/FastAPI-WebSocket-009688.svg?logo=fastapi&logoColor=white)
 ![Stars](https://img.shields.io/github/stars/didilili/deepsearch-agents?logo=github&style=flat)
 [![Read Online](https://img.shields.io/badge/在线教程-点击访问-blue?logo=bookstack)](https://didilili.github.io/ai-agents-from-zero/#/%E5%AE%9E%E6%88%98%E9%A1%B9%E7%9B%AE-%E6%B7%B1%E5%BA%A6%E7%A0%94%E6%90%9C/0-%E5%89%8D%E8%A8%80)
+[![CI Eval](https://img.shields.io/badge/CI-eval_regression-2EA44F?style=flat)](.github/workflows/eval-regression.yml)
 
 </div>
 
-**📢 说明**：本套实战项目已于 2026 年 5 月 17 日 更新完成，配套教程、章节分支和前后端代码均可对照学习。
+**📢 说明**：本仓库在 2026 年 5 月教学版基础上，已完成 **Agent Harness 企业级升级（v1.0-harness）**，配套设计文档 [`docs/AGENT_HARNESS_DESIGN.md`](docs/AGENT_HARNESS_DESIGN.md)、[BrowseComp-Plus 固定语料评测指南](docs/BROWSECOMP_PLUS_EVAL.md)、golden task 评测与 GitHub Actions 回归门禁。
 
 如果你正在找一个适合学习 `DeepAgents`、`WebSocket`、`Tavily`、`RAGFlow` 和 AI Agent 工程开发的实战项目，「深度研搜」很可能是最适合你的项目。
 
@@ -24,6 +28,119 @@
 > 如果你想系统学习「AI 智能体 大模型应用开发」，也可直接从系统教程 [AI 智能体实战速成指南-大模型入门](https://didilili.github.io/ai-agents-from-zero/#/) 开始。
 
 ![深度研搜前端首页：任务示例、助手状态和对话式多智能体研究台](docs/images/deepsearch-agent-home.jpg)
+
+## 🎯 Agent Harness 企业级升级（面试版）
+
+> **定位**：在 DeepAgents/LangGraph 之上自研 Harness 运行时层，把隐式 Agent Loop **显式化**为可见、可测、可控的工程系统。
+
+### 面试一句话
+
+> 在深度研搜场景下，我实现了 per-step Harness Loop（understand → plan → execute → compress → validate → recover → finalize），接入 MCP 工具注册、跨会话记忆、Langfuse/JSONL 观测和 golden task 评测；当前是 **可演示 MVP+**，生产侧清楚还缺 HITL、Redis Checkpointer 和全量 MCP Server 集群。
+
+### Harness 五层架构
+
+```text
+Layer 5  体验层     React — Phase 时间线 / 文件下载
+Layer 4  服务层     FastAPI — 任务调度 / WebSocket / GET /health
+Layer 3  Harness层  loop / validator / recovery / compressor / context_builder  ← 核心自研
+Layer 2  Runtime层  DeepAgents + LangGraph + InMemorySaver
+Layer 1  工具层     MCP Registry + Tavily MCP Server(stdio) + MySQL + RAGFlow + Memory
+```
+
+### 核心能力矩阵
+
+| 能力 | 实现 | 关键路径 |
+|------|------|----------|
+| 显式 Loop | per-step execute/compress/validate/recover | `app/agent/harness/loop.py` |
+| 结果校验 | step + finalize 双层校验 | `app/agent/harness/validator.py` |
+| 失败恢复 | 结构化 hint + 重试上限 | `app/agent/harness/recovery.py` |
+| 上下文压缩 | LLM 摘要 + 截断降级 | `app/agent/harness/compressor.py` |
+| 跨会话记忆 | recall/remember（Mem0 或本地 JSON） | `app/agent/memory/` |
+| MCP 工具发现 | Registry + **真 stdio MCP Server（Tavily）** | `app/mcp/` |
+| 可观测性 | WebSocket + Langfuse + JSONL 日志 | `app/api/monitor.py` `tracing.py` `trace_logger.py` |
+| 评测回归 | 10 条 golden task + 8 项指标 + baseline | `tests/eval/` + CI |
+| 配置化 | `harness.yml` 统一开关 | `app/config/harness.yml` |
+| 健康检查 | `GET /health` 依赖探针 | `app/api/health.py` |
+
+### 执行数据流（升级后）
+
+```text
+用户任务 → FastAPI(thread_id)
+  → AgentHarness.run()
+      → understand → plan → build_context(memory recall)
+      → for each step: execute → compress → validate
+          → fail → recover → retry
+      → finalize(memory remember) → JSONL trace
+  → WebSocket 推送 phase 事件 → 前端时间线
+```
+
+### 快速验证（面试 Demo）
+
+```bash
+# 1. 单元测试（无需 API Key）
+uv run python tests/test_harness_phase1.py
+uv run python tests/test_harness_phase4.py
+uv run python tests/test_mcp_tavily_server.py
+
+# 2. Eval 评测 + 基线对比
+uv run python tests/eval/run_eval.py --dry-run --baseline tests/eval/results/baseline.json --report-md
+
+# 3. Live 评测（需 .env 配置 LLM/Tavily）
+uv run python tests/eval/run_eval.py --live --limit 3 --report-md
+
+# 4. 健康检查
+uv run uvicorn app.api.server:app --reload
+curl http://localhost:8000/health
+
+# 5. 真 MCP Tavily Server（stdio，需 TAVILY_API_KEY）
+# 在 harness.yml 设 mcp.tavily_enabled: true 或 .env 设 HARNESS_MCP_TAVILY=true
+uv run python -m app.mcp.servers.tavily_server
+```
+
+### Eval 指标（8 项）
+
+| 指标 | 含义 | 目标 |
+|------|------|------|
+| TSR | 任务成功率 | ≥ 70% |
+| TSA | 工具/子 Agent 选择准确率 | ≥ 80% |
+| SSR | 各 step 校验通过率 | ≥ 85% |
+| RR | 失败后恢复成功率 | ≥ 60% |
+| ATC | 平均工具调用次数 | ≤ 8 |
+| AL | 端到端延迟 | ≤ 120s |
+| CR | 压缩率 | ≤ 30% |
+| MRH | 跨会话记忆召回命中 | ≥ 80% |
+
+CI 在每次 push/PR 时自动跑 dry-run eval，**TSR 下降 > 5% 则阻断合并**（见 [`.github/workflows/eval-regression.yml`](.github/workflows/eval-regression.yml)）。
+
+### 面试必须能演示的 5 件事
+
+1. 完整链路：搜索 + DB + 生成 PDF
+2. 前端 Phase 时间线（含 Step 1/3）
+3. **HITL 审批**：数据库步骤 gate 或 `generate_markdown` interrupt_on 弹窗
+4. Eval 跑分报告（侧边栏 **Eval 面板**）
+5. Trace 查看器（JSONL + Langfuse 外链）
+
+### 生产特性（Phase 5 + Phase 6）
+
+| 特性 | 入口 | 说明 |
+|------|------|------|
+| HITL `interrupt_on` | 对话页审批卡片 | `generate_markdown` / `convert_md_to_pdf` 执行前暂停 |
+| Step Gate | 同上 | `database_query` 步骤执行前人工确认 |
+| **Plan Review + Edit** | 同上 | 多意图任务计划审批，支持 JSON 编辑步骤（Phase 6） |
+| **Dynamic Re-plan** | Harness Loop | 失败/用户编辑后动态插入步骤（Phase 6） |
+| **Citation-First** | finalize + Trace | 证据链 `evidence.json`、参考文献块、CCR/HR 指标 |
+| **Trajectory Diff Eval** | Eval 面板 | TDS 轨迹相似度 + golden `expected_trajectory` |
+| Resume API | `POST /api/task/{thread_id}/resume` | `{decisions:[{type:"approve"\|"edit"\|"reject"}]}` |
+| Eval 面板 | 侧边栏 → Eval 面板 | `GET /api/eval/latest` + 一键 dry-run |
+| Trace 查看器 | 侧边栏 → Trace 查看器 | JSONL / **证据链** / Langfuse |
+
+```bash
+# HITL 演示任务
+从数据库查询心血管药品库存，生成 Markdown 报告   # 先弹 step gate
+搜索 AI 趋势并生成 Markdown 报告                 # 命中 generate_markdown interrupt_on
+```
+
+---
 
 ## 📖 项目介绍
 
@@ -51,17 +168,20 @@
 ```text
 用户任务
   -> FastAPI 接口接收请求
-  -> run_deep_agent 创建会话目录并写入上下文
-  -> 主智能体分析任务
+  -> AgentHarness.run() 显式 Loop
+  -> understand / plan / per-step execute / validate / recover
   -> 分派给网络搜索助手 / 数据库查询助手 / RAGFlow 助手
-  -> 主智能体汇总多来源信息
+  -> MCP Registry 按 step 注入工具上下文
   -> 调用文件工具生成 Markdown / PDF
-  -> monitor 通过 WebSocket 推送进度
-  -> 前端展示事件、答案和文件列表
+  -> monitor + JSONL + Langfuse 记录全链路
+  -> 前端展示 Phase 时间线、答案和文件列表
 ```
 
 ## ✨ 项目亮点
 
+- **自研 Agent Harness 运行时层（2026 面试核心）**
+  - 显式 per-step Loop：execute → compress → validate → recover，非黑盒 `astream`。
+  - `harness.yml` 配置化 + budget 守卫 + JSONL 结构化日志 + `GET /health`。
 - **一主三从的多智能体架构**
   - 主智能体负责理解任务、规划步骤、调度助手和最终汇总。
   - 网络搜索助手、数据库查询助手、RAGFlow 助手分别处理不同信息来源。
@@ -78,6 +198,10 @@
   - 通过 `thread_id` 和 `session_dir` 区分不同任务，`ContextVar` 让深层工具也能拿到当前会话身份和文件目录。
 - **工程化前后端结构清晰**
   - 基于 `FastAPI + WebSocket + DeepAgents + React` 组织任务接口、异步执行、事件推送、文件上传和文件下载。
+- **Golden Task 评测 + CI 回归门禁**
+  - 10 条评测任务、8 项指标、baseline 对比；GitHub Actions 自动跑分。
+- **真 MCP Server（Tavily stdio）**
+  - `app/mcp/servers/tavily_server.py` 通过 MCP 协议暴露搜索工具，Registry 可按 step 发现。
 - **不仅有实战代码，还有完整配套教程文档**
   - 项目配有一套系统化、完全免费的教程讲义，适合按章节从 DeepAgents 基础、子智能体、Backend、中间件一直学到完整项目闭环。
 - **兼顾学习价值与可扩展性**
@@ -127,8 +251,12 @@
 | 私有知识库     | `RAGFlow` / `ragflow-sdk`                        | 为知识库助手提供内部文档问答能力                                              |
 | 文件处理       | `pypdf` / `python-docx` / `pandas` / `ReportLab` | 读取上传附件，生成 Markdown，转换 PDF                                         |
 | 后端接口       | `FastAPI` / `Uvicorn`                            | 提供任务、取消、上传、文件列表、下载和 WebSocket 接口                         |
-| 实时通信       | `WebSocket`                                      | 推送工具调用、助手调用、最终结果和错误事件                                    |
-| 前端           | `React` / `Vite` / `Ant Design` / `Tailwind CSS` | 提供对话式研搜界面、事件流、附件上传和文件下载                                |
+| 实时通信       | `WebSocket`                                      | 推送工具调用、助手调用、Harness Phase 事件和最终结果 |
+| 可观测性       | `Langfuse` + JSONL                               | 可选 Langfuse trace + 每次 run 写 `logs/traces/*.jsonl` |
+| MCP            | `mcp` SDK + stdio                                | Tavily 真 MCP Server；Registry 按 step 发现工具 |
+| Harness 配置   | `harness.yml`                                    | max_retries / 压缩 / 记忆 / 观测 / budget / MCP 开关 |
+| 评测           | `tests/eval/`                                    | golden task + 8 指标 + baseline 回归 |
+| 前端           | `React` / `Vite` / `Ant Design` / `Tailwind CSS` | 对话式研搜界面、Harness Phase 时间线、附件上传和文件下载 |
 | 依赖管理       | `uv` / `pnpm`                                    | 管理 Python 后端和前端依赖                                                    |
 
 ## 📁 项目结构
@@ -137,32 +265,48 @@
 deepsearch-agents/
 ├── app/
 │   ├── agent/
+│   │   ├── harness/                # 【核心】Agent Harness：loop/validator/recovery/compressor
+│   │   ├── memory/                 # 跨会话记忆 store + extractor
 │   │   ├── subagents/              # 网络搜索、数据库查询、RAGFlow 三个子智能体
-│   │   ├── llm.py                  # OpenAI 兼容模型初始化
-│   │   ├── main_agent.py           # 主智能体组装与 run_deep_agent 执行入口
-│   │   └── prompts.py              # 读取 app/prompt/prompts.yml
+│   │   ├── llm.py
+│   │   ├── main_agent.py           # 委托 AgentHarness.run()
+│   │   └── prompts.py
 │   ├── api/
-│   │   ├── context.py              # ContextVar 保存 thread_id 和 session_dir
-│   │   ├── monitor.py              # 工具调用、助手调用、结果和异常事件推送
-│   │   └── server.py               # FastAPI 任务、上传、文件、下载、WebSocket 接口
+│   │   ├── context.py
+│   │   ├── monitor.py              # WebSocket 事件 + report_phase()
+│   │   ├── tracing.py              # Langfuse（可选）
+│   │   ├── trace_logger.py         # JSONL 结构化日志
+│   │   ├── health.py               # GET /health 依赖探针
+│   │   └── server.py
+│   ├── config/
+│   │   └── harness.yml             # Harness 统一配置
+│   ├── mcp/
+│   │   ├── registry.py             # MCP 工具注册表
+│   │   ├── client.py               # bootstrap + MCP 桥接
+│   │   ├── mcp_runtime.py          # stdio MCP Client
+│   │   └── servers/
+│   │       └── tavily_server.py    # 真 MCP Server（Tavily）
 │   ├── prompt/
-│   │   └── prompts.yml             # 主智能体和子智能体提示词配置
-│   ├── ragflow/                    # RAGFlow 配置和基础调用示例
-│   ├── tools/                      # Tavily、MySQL、RAGFlow、文件读取、Markdown、PDF 工具
-│   ├── utils/                      # 路径解析、Markdown/PDF 底层转换等普通 Python 工具
-│   ├── output/                     # 运行时生成：每个会话的 Markdown、PDF 等产物
-│   └── updated/                    # 运行时生成：用户上传文件的会话暂存目录
+│   ├── ragflow/
+│   ├── tools/
+│   ├── utils/
+│   ├── logs/traces/                # 运行时：JSONL trace（gitignore）
+│   ├── output/
+│   └── updated/
+├── .github/workflows/
+│   └── eval-regression.yml         # CI：dry-run eval + TSR 回归门禁
 ├── docker/
-│   ├── docker-compose.yaml         # 本地 MySQL 教学环境
-│   └── mysql/mysql.sql             # 药品、库存、销售记录模拟数据
-├── docs/knowledge_base/            # RAGFlow 知识库示例 PDF
-├── examples/                       # DeepAgents 章节示例脚本
-├── frontend/                       # React + Vite 前端项目
-├── tests/                          # 测试目录
-├── .env.example                    # 环境变量示例
-├── pyproject.toml                  # Python 项目依赖声明
-├── requirements.txt                # 依赖清单
-└── uv.lock                         # uv 锁定文件
+├── docs/
+│   └── AGENT_HARNESS_DESIGN.md     # Harness 设计文档 v1.0
+├── tests/
+│   ├── eval/                       # golden task + metrics + run_eval
+│   ├── test_harness_phase1.py
+│   ├── test_harness_phase4.py
+│   └── test_mcp_tavily_server.py
+├── frontend/
+├── .env.example
+├── pyproject.toml
+└── requirements.txt
 ```
 
 ## 🚀 快速开始
@@ -251,7 +395,13 @@ uv run uvicorn app.api.server:app --host 0.0.0.0 --port 8000 --reload
 | `POST /api/upload`                  | 上传一个或多个文件到当前会话           |
 | `GET /api/files`                    | 列出当前会话输出目录中的生成文件       |
 | `GET /api/download`                 | 下载输出目录中的文件                   |
-| `WebSocket /ws/{thread_id}`         | 推送工具调用、助手调用、结果和异常事件 |
+| `POST /api/task/{thread_id}/resume` | HITL 人工审批恢复（approve/reject/edit） |
+| `GET /api/task/{thread_id}/hitl/pending` | 查询待审批动作 |
+| `GET /api/eval/latest` | Eval 面板：最新评测报告 |
+| `POST /api/eval/run` | 触发 dry-run / live eval |
+| `GET /api/traces/jsonl/{session_id}` | Trace 查看器：本地 JSONL |
+| `GET /api/traces/langfuse/{session_id}` | Trace 查看器：Langfuse 代理 |
+| `WebSocket /ws/{thread_id}`         | 推送工具调用、助手调用、Phase 事件和结果 |
 
 ### 8. 启动前端
 
@@ -322,16 +472,25 @@ git checkout main
 
 ## 🚧 能力边界
 
-「深度研搜」适合入门到进阶阶段学习多智能体工程主链路，但它不是一个完整企业级生产系统。当前版本重点覆盖 DeepAgents 多智能体调度、真实工具接入、文件交付、FastAPI 接口、WebSocket 实时推送和前后端联调。
+「深度研搜」已完成 **Agent Harness MVP+**（显式 Loop、评测、MCP、记忆、观测），适合 Agent / Harness 工程师面试展示；但**不是**完整企业级生产系统。
 
-它没有刻意展开以下生产治理能力：
+### 已覆盖（Harness MVP+）
 
-- 用户登录、角色权限和多租户隔离；
-- 文件上传安全扫描和内容审核；
-- 任务队列、分布式执行和大规模并发治理；
-- 全量事件持久化、历史会话恢复和审计追踪；
-- 系统化评测集、自动化回归和 Agent 质量评估；
-- 生产监控、告警、链路追踪和灰度发布；
-- 复杂报告编辑、协同工作流和权限化文件管理。
+- 显式 per-step Harness Loop + 校验恢复 + 上下文压缩
+- golden task 评测（8 指标）+ baseline 回归 + GitHub Actions CI
+- MCP Registry + Tavily 真 MCP Server（stdio）
+- 跨会话记忆（Mem0 可选 / 本地 JSON 降级）
+- Langfuse trace（可选）+ JSONL 结构化日志 + `GET /health`
+- `harness.yml` 配置化 + budget 守卫
+- **HITL 人工审批**（`interrupt_on` + step gate + 前端审批卡片）
+- **前端 Eval 面板** + **Trace 查看器**（JSONL / Langfuse）
 
-这些能力适合在主链路跑通之后继续扩展。本仓库先承担一个清晰角色：把 DeepAgents 多智能体项目最关键、最必要、最值得学习的工程骨架讲清楚、跑起来，并为后续企业级扩展打基础。
+### 未覆盖（生产演进，面试中主动说明）
+
+- 用户登录、RBAC、多租户隔离
+- Redis/Postgres Checkpointer 持久化（当前 InMemorySaver）
+- 全量工具 MCP Server 化（当前仅 Tavily；DB/RAGFlow 仍为 LangChain @tool）
+- 任务队列、分布式执行、全局限流
+- 前端 Eval 面板 / Langfuse Trace 查看器
+
+这些能力适合在面试中作为「我知道还缺什么、怎么演进」加分项，而非当前 MVP 范围。

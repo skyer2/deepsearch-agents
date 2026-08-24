@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { cancelTask, listSessionFiles, startTask, uploadSessionFiles } from "../lib/api";
-import { WS_BASE_URL } from "../lib/config";
+import { cancelTask, listSessionFiles, resumeHitl, startTask, uploadSessionFiles } from "../lib/api";
+import { WS_BASE_URL, wsUrl } from "../lib/config";
 import { createThreadId, getStoredThreadId, storeThreadId } from "../lib/thread";
 import type {
   ConnectionState,
+  HitlInterruptPayload,
   MonitorMessage,
   OutputFile,
   SocketMessage,
@@ -34,6 +35,9 @@ export function useDeepAgentSession() {
   const [isCancelling, setIsCancelling] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadedItems, setUploadedItems] = useState<UploadedItem[]>([]);
+  const [hitlPending, setHitlPending] = useState<HitlInterruptPayload | null>(null);
+  const [isHitlSubmitting, setIsHitlSubmitting] = useState(false);
+  const [taskFailure, setTaskFailure] = useState<{ message: string } | null>(null);
 
   const clearSocketTimers = useCallback(() => {
     if (reconnectTimerRef.current) {
@@ -59,6 +63,25 @@ export function useDeepAgentSession() {
     uploadedNameSetRef.current.clear();
     setIsRunning(false);
     setIsCancelling(false);
+    setHitlPending(null);
+    setIsHitlSubmitting(false);
+    setTaskFailure(null);
+  }, []);
+
+  const discardFailedTask = useCallback(() => {
+    const nextThreadId = createThreadId();
+    storeThreadId(nextThreadId);
+    setThreadId(nextThreadId);
+    setEvents([]);
+    setFiles([]);
+    setSessionPath("");
+    setResult("");
+    setLastError("");
+    setHitlPending(null);
+    setIsHitlSubmitting(false);
+    setIsRunning(false);
+    setIsCancelling(false);
+    setTaskFailure(null);
   }, []);
 
   const refreshFiles = useCallback(async () => {
@@ -68,6 +91,10 @@ export function useDeepAgentSession() {
 
     const response = await listSessionFiles(sessionPath);
     if (response.error) {
+      if (response.error.includes("拒绝访问")) {
+        setSessionPath("");
+        setFiles([]);
+      }
       throw new Error(response.error);
     }
     setFiles(response.files || []);
@@ -82,7 +109,7 @@ export function useDeepAgentSession() {
       socketRef.current?.close();
       setConnectionState(hadSocket ? "reconnecting" : "connecting");
 
-      const socket = new WebSocket(`${WS_BASE_URL}/ws/${encodeURIComponent(threadId)}`);
+      const socket = new WebSocket(wsUrl(threadId));
       socketRef.current = socket;
 
       socket.onopen = () => {
@@ -122,6 +149,27 @@ export function useDeepAgentSession() {
             }
           }
 
+          if (payload.event === "hitl_interrupt") {
+            setHitlPending({
+              session_id: extractString(payload.data, "session_id") || threadId,
+              action_requests: Array.isArray(payload.data.action_requests)
+                ? (payload.data.action_requests as HitlInterruptPayload["action_requests"])
+                : [],
+              review_configs: Array.isArray(payload.data.review_configs)
+                ? (payload.data.review_configs as HitlInterruptPayload["review_configs"])
+                : [],
+              step_index:
+                typeof payload.data.step_index === "number"
+                  ? payload.data.step_index
+                  : undefined,
+              gate_type:
+                typeof payload.data.gate_type === "string"
+                  ? payload.data.gate_type
+                  : undefined,
+              editable: Boolean(payload.data.editable)
+            });
+          }
+
           if (payload.event === "task_result") {
             const finalResult = extractString(payload.data, "result");
             setResult(finalResult || payload.message);
@@ -137,6 +185,7 @@ export function useDeepAgentSession() {
 
           if (payload.event === "error") {
             setLastError(payload.message);
+            setTaskFailure({ message: payload.message });
             setIsRunning(false);
             setIsCancelling(false);
           }
@@ -147,7 +196,9 @@ export function useDeepAgentSession() {
 
       socket.onerror = () => {
         if (!disposed && socketRef.current === socket) {
-          setLastError("WebSocket 连接异常，请确认后端服务已启动");
+          setLastError(
+            `WebSocket 连接失败 (${WS_BASE_URL}/ws/...)，请检查 ENDPOINTS 配置与后端 8000 端口`
+          );
         }
       };
 
@@ -204,6 +255,8 @@ export function useDeepAgentSession() {
       setEvents([]);
       setResult("");
       setLastError("");
+      setHitlPending(null);
+      setTaskFailure(null);
       try {
         const response = await startTask(cleanQuery, threadId);
         if (response.thread_id && response.thread_id !== threadId) {
@@ -283,6 +336,33 @@ export function useDeepAgentSession() {
     [threadId]
   );
 
+  const submitHitlDecisions = useCallback(
+    async (
+      decisions: Array<{
+        type: "approve" | "reject" | "edit";
+        edited_action?: Record<string, unknown>;
+      }>
+    ) => {
+      if (!hitlPending) {
+        throw new Error("当前没有待审批动作");
+      }
+      setIsHitlSubmitting(true);
+      setLastError("");
+      try {
+        const count = hitlPending.action_requests.length || decisions.length;
+        const normalized =
+          decisions.length === count
+            ? decisions
+            : Array.from({ length: count }, () => decisions[0] || { type: "approve" as const });
+        await resumeHitl(threadId, normalized);
+        setHitlPending(null);
+      } finally {
+        setIsHitlSubmitting(false);
+      }
+    },
+    [hitlPending, threadId]
+  );
+
   const stats = useMemo(() => {
     const toolEvents = events.filter((event) => event.event === "tool_start").length;
     const assistantEvents = events.filter((event) => event.event === "assistant_call").length;
@@ -303,15 +383,20 @@ export function useDeepAgentSession() {
     isCancelling,
     isRunning,
     isUploading,
+    hitlPending,
+    isHitlSubmitting,
+    taskFailure,
     lastError,
     lastPongAt,
     refreshFiles,
     resetSession,
+    discardFailedTask,
     result,
     sessionPath,
     stats,
     cancelCurrentTask,
     submitTask,
+    submitHitlDecisions,
     threadId,
     uploadFiles,
     uploadedItems

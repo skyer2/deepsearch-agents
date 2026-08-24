@@ -1,21 +1,28 @@
 import {
   ApiOutlined,
+  BarChartOutlined,
   BranchesOutlined,
   CheckCircleOutlined,
   CloseCircleOutlined,
   CloudServerOutlined,
   DatabaseOutlined,
   FileSearchOutlined,
+  LineChartOutlined,
+  MessageOutlined,
   ToolOutlined
 } from "@ant-design/icons";
 import { Alert, App as AntApp, Button } from "antd";
 import { useEffect, useRef, useState } from "react";
+import { ApprovalPanel } from "./components/ApprovalPanel";
 import { ChatComposer } from "./components/ChatComposer";
 import { ConversationThread } from "./components/ConversationThread";
 import type { ChatTurn } from "./components/ConversationThread";
+import { EvalPanel } from "./components/EvalPanel";
+import { EventStream } from "./components/EventStream";
+import { TraceViewer } from "./components/TraceViewer";
 import { API_BASE_URL, WS_BASE_URL } from "./lib/config";
 import { useDeepAgentSession } from "./hooks/useDeepAgentSession";
-import type { ConnectionState, UploadedItem } from "./types";
+import type { ConnectionState, UploadedItem, WorkspaceTab } from "./types";
 
 function connectionLabel(state: ConnectionState): string {
   const labels: Record<ConnectionState, string> = {
@@ -44,7 +51,9 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [stagedItems, setStagedItems] = useState<UploadedItem[]>([]);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
+  const [workspace, setWorkspace] = useState<WorkspaceTab>("chat");
   const streamRef = useRef<HTMLElement | null>(null);
+  const failureHandledRef = useRef<string | null>(null);
   const session = useDeepAgentSession();
 
   useEffect(() => {
@@ -67,8 +76,32 @@ export default function App() {
   }, [session.events, session.files, session.isRunning, session.result]);
 
   useEffect(() => {
+    if (!session.taskFailure) {
+      return;
+    }
+
+    const failureKey = `${session.taskFailure.message}:${session.events.length}`;
+    if (failureHandledRef.current === failureKey) {
+      return;
+    }
+    failureHandledRef.current = failureKey;
+
+    const failureMessage = session.taskFailure.message;
+    setTurns((previous) => {
+      if (previous.length === 0) {
+        return previous;
+      }
+      const lastTurn = previous[previous.length - 1];
+      setQuery(lastTurn.content);
+      return previous.slice(0, -1);
+    });
+    session.discardFailedTask();
+    message.warning(`任务失败，已撤回本次提问：${failureMessage}`);
+  }, [message, session.discardFailedTask, session.taskFailure, session.events.length]);
+
+  useEffect(() => {
     const streamNode = streamRef.current;
-    if (!streamNode) {
+    if (!streamNode || workspace !== "chat") {
       return;
     }
 
@@ -78,7 +111,7 @@ export default function App() {
         behavior: "smooth"
       });
     });
-  }, [turns]);
+  }, [turns, workspace]);
 
   async function handleSubmit() {
     const cleanQuery = query.trim();
@@ -90,22 +123,14 @@ export default function App() {
     const nextTurn = createTurn(cleanQuery);
     setTurns((previous) => [...previous, nextTurn]);
     setQuery("");
+    setWorkspace("chat");
 
     try {
       await session.submitTask(cleanQuery);
       message.success("任务已启动，执行过程会显示在对话中");
     } catch (error) {
-      setTurns((previous) =>
-        previous.map((turn) =>
-          turn.id === nextTurn.id
-            ? {
-                ...turn,
-                isRunning: false,
-                result: error instanceof Error ? error.message : "任务启动失败"
-              }
-            : turn
-        )
-      );
+      setTurns((previous) => previous.slice(0, -1));
+      setQuery(cleanQuery);
       message.error(error instanceof Error ? error.message : "任务启动失败");
     }
   }
@@ -130,10 +155,21 @@ export default function App() {
   }
 
   function handleNewSession() {
+    failureHandledRef.current = null;
     session.resetSession();
     setTurns([]);
     setQuery("");
     setStagedItems([]);
+    setWorkspace("chat");
+  }
+
+  async function handleHitlDecisions(decisions: Array<{ type: "approve" | "reject" }>) {
+    try {
+      await session.submitHitlDecisions(decisions);
+      message.success("审批已提交，任务继续执行");
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "审批提交失败");
+    }
   }
 
   const online = session.connectionState === "connected";
@@ -144,12 +180,42 @@ export default function App() {
         <div className="sidebar-brand">
           <span className="panel-kicker">DEEPSEARCH</span>
           <h1>深度研搜</h1>
-          <p>对话式多智能体研究台</p>
+          <p>Harness 生产特性演示台</p>
         </div>
 
         <Button className="new-chat-button" block onClick={handleNewSession}>
           新建研搜
         </Button>
+
+        <div className="workspace-nav">
+          <Button
+            className={workspace === "chat" ? "workspace-nav-btn workspace-nav-btn--active" : "workspace-nav-btn"}
+            icon={<MessageOutlined aria-hidden />}
+            onClick={() => setWorkspace("chat")}
+            type={workspace === "chat" ? "primary" : "default"}
+            block
+          >
+            对话
+          </Button>
+          <Button
+            className={workspace === "eval" ? "workspace-nav-btn workspace-nav-btn--active" : "workspace-nav-btn"}
+            icon={<BarChartOutlined aria-hidden />}
+            onClick={() => setWorkspace("eval")}
+            type={workspace === "eval" ? "primary" : "default"}
+            block
+          >
+            Eval 面板
+          </Button>
+          <Button
+            className={workspace === "trace" ? "workspace-nav-btn workspace-nav-btn--active" : "workspace-nav-btn"}
+            icon={<LineChartOutlined aria-hidden />}
+            onClick={() => setWorkspace("trace")}
+            type={workspace === "trace" ? "primary" : "default"}
+            block
+          >
+            Trace 查看器
+          </Button>
+        </div>
 
         <div className="sidebar-section">
           <span className="sidebar-label">THREAD</span>
@@ -201,7 +267,7 @@ export default function App() {
 
         <div className="sidebar-section sidebar-endpoints">
           <span className="sidebar-label">ENDPOINTS</span>
-          <code>{API_BASE_URL}</code>
+          <code>{API_BASE_URL || `${window.location.origin} (dev proxy)`}</code>
           <code>{WS_BASE_URL}</code>
         </div>
       </aside>
@@ -209,45 +275,82 @@ export default function App() {
       <main className="chat-main">
         <header className="chat-topbar">
           <div>
-            <span className="panel-kicker">CHAT WORKSPACE</span>
-            <h2>深度研搜对话</h2>
+            <span className="panel-kicker">
+              {workspace === "chat" ? "CHAT WORKSPACE" : workspace === "eval" ? "EVAL PANEL" : "TRACE VIEWER"}
+            </span>
+            <h2>
+              {workspace === "chat"
+                ? "深度研搜对话"
+                : workspace === "eval"
+                  ? "Harness Eval 评测"
+                  : "Harness Trace 观测"}
+            </h2>
           </div>
-          <div className={`run-indicator ${session.isRunning ? "run-indicator--live" : ""}`}>
-            {session.isRunning ? <BranchesOutlined aria-hidden /> : <CheckCircleOutlined aria-hidden />}
-            {session.isRunning ? "研搜中" : "待命"}
+          <div
+            className={`run-indicator ${session.isRunning || session.hitlPending ? "run-indicator--live" : ""}`}
+          >
+            {session.hitlPending ? (
+              <span>等待 HITL 审批</span>
+            ) : session.isRunning ? (
+              <>
+                <BranchesOutlined aria-hidden /> 研搜中
+              </>
+            ) : (
+              <>
+                <CheckCircleOutlined aria-hidden /> 待命
+              </>
+            )}
           </div>
         </header>
 
         {session.lastError ? (
-          <Alert
-            className="chat-alert"
-            message={session.lastError}
-            showIcon
-            type="error"
+          <Alert className="chat-alert" message={session.lastError} showIcon type="error" />
+        ) : null}
+
+        {session.hitlPending ? (
+          <ApprovalPanel
+            isSubmitting={session.isHitlSubmitting}
+            onApproveAll={() =>
+              void handleHitlDecisions(
+                session.hitlPending!.action_requests.map(() => ({ type: "approve" as const }))
+              )
+            }
+            onDecide={(decisions) => void handleHitlDecisions(decisions)}
+            onRejectAll={() =>
+              void handleHitlDecisions(
+                session.hitlPending!.action_requests.map(() => ({ type: "reject" as const }))
+              )
+            }
+            payload={session.hitlPending}
           />
         ) : null}
 
-        <section className="chat-stream-panel" ref={streamRef}>
-          <ConversationThread
-            onUseExample={setQuery}
-            turns={turns}
-          />
-        </section>
+        {workspace === "chat" ? (
+          <section className="chat-stream-panel" ref={streamRef}>
+            <EventStream events={session.events} />
+            <ConversationThread onUseExample={setQuery} turns={turns} />
+          </section>
+        ) : null}
 
-        <ChatComposer
-          isCancelling={session.isCancelling}
-          isRunning={session.isRunning}
-          isUploading={session.isUploading}
-          onCancel={handleCancel}
-          onNewSession={handleNewSession}
-          onQueryChange={setQuery}
-          onStagedItemsChange={setStagedItems}
-          onSubmit={handleSubmit}
-          onUpload={handleUpload}
-          query={query}
-          stagedItems={stagedItems}
-          uploadedItems={session.uploadedItems}
-        />
+        {workspace === "eval" ? <EvalPanel /> : null}
+        {workspace === "trace" ? <TraceViewer sessionId={session.threadId} /> : null}
+
+        {workspace === "chat" ? (
+          <ChatComposer
+            isCancelling={session.isCancelling}
+            isRunning={session.isRunning}
+            isUploading={session.isUploading}
+            onCancel={handleCancel}
+            onNewSession={handleNewSession}
+            onQueryChange={setQuery}
+            onStagedItemsChange={setStagedItems}
+            onSubmit={handleSubmit}
+            onUpload={handleUpload}
+            query={query}
+            stagedItems={stagedItems}
+            uploadedItems={session.uploadedItems}
+          />
+        ) : null}
       </main>
     </div>
   );
