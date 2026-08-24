@@ -28,7 +28,7 @@ async def _run():
         embedding_enabled=False,
     )
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         tmp_path = Path(tmp)
         sqlite_backend = SqliteMemoryBackend(tmp_path / "memory.db", policy)
         store = MemoryStore(backend=sqlite_backend, policy=policy)
@@ -47,7 +47,8 @@ async def _run():
         assert len(result.records) >= 1
         assert "15%" in result.records[0].fact
 
-        merged = await store.remember_writes(
+        # 数字变化视为矛盾 → SUPERSEDE（旧记录软删，新记录带取代链）
+        superseded = await store.remember_writes(
             [
                 MemoryWriteRequest(
                     fact="机器人行业2025年增速约15.5%",
@@ -58,10 +59,28 @@ async def _run():
             user_id=uid,
             tenant_id=tid,
         )
-        assert merged == 1
+        assert superseded == 1
         records = store.list_records(uid, tenant_id=tid)
         assert len(records) == 1
-        assert records[0].version == 2
+        assert "15.5%" in records[0].fact
+        assert records[0].supersedes  # 指向被取代的旧 id
+
+        # 同主题非矛盾刷新 → UPDATE，version 递增
+        refreshed = await store.remember_writes(
+            [
+                MemoryWriteRequest(
+                    fact="机器人行业2025年增速约15.5%，主要来自工业场景",
+                    memory_type=MemoryType.SEMANTIC,
+                    write_source=WriteSource.FINALIZE,
+                )
+            ],
+            user_id=uid,
+            tenant_id=tid,
+        )
+        assert refreshed == 1
+        records = store.list_records(uid, tenant_id=tid)
+        assert len(records) == 1
+        assert records[0].version >= 2
 
         rid = records[0].id
         assert await store.delete(rid, uid, tenant_id=tid)

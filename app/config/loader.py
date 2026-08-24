@@ -55,6 +55,21 @@ class HarnessConfig:
     memory_pii_redact_enabled: bool = True
     memory_step_incremental_enabled: bool = True
     memory_remember_on_partial: bool = False
+    memory_project_scope_enabled: bool = True
+    memory_require_explicit_identity: bool = False
+    memory_min_recall_trust: str = "untrusted"
+    memory_synthesis_min_trust: str = "derived"
+    memory_require_provenance_for_step_write: bool = True
+    memory_source_ledger_enabled: bool = True
+    memory_source_ledger_max_inject: int = 8
+    memory_step_recall_enabled: bool = True
+    memory_step_recall_top_k: int = 3
+    memory_consolidation_enabled: bool = True
+    memory_consolidation_async: bool = True
+    memory_consolidation_half_life_days: int = 30
+    memory_consolidation_min_confidence: float = 0.25
+    memory_consolidation_promote_min_sessions: int = 2
+    memory_purge_after_days: int = 180
 
     validation_strict_mode: bool = False
 
@@ -246,6 +261,48 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
             "HARNESS_MEMORY_REMEMBER_ON_PARTIAL",
             bool(memory.get("remember_on_partial", False)),
         ),
+        memory_project_scope_enabled=_env_bool(
+            "HARNESS_MEMORY_PROJECT_SCOPE",
+            bool(memory.get("project_scope_enabled", True)),
+        ),
+        memory_require_explicit_identity=_env_bool(
+            "HARNESS_MEMORY_REQUIRE_IDENTITY",
+            bool(memory.get("require_explicit_identity", False)),
+        ),
+        memory_min_recall_trust=str(memory.get("min_recall_trust", "untrusted")),
+        memory_synthesis_min_trust=str(memory.get("synthesis_min_trust", "derived")),
+        memory_require_provenance_for_step_write=_env_bool(
+            "HARNESS_MEMORY_REQUIRE_PROVENANCE",
+            bool(memory.get("require_provenance_for_step_write", True)),
+        ),
+        memory_source_ledger_enabled=_env_bool(
+            "HARNESS_MEMORY_SOURCE_LEDGER",
+            bool(memory.get("source_ledger_enabled", True)),
+        ),
+        memory_source_ledger_max_inject=int(memory.get("source_ledger_max_inject", 8)),
+        memory_step_recall_enabled=_env_bool(
+            "HARNESS_MEMORY_STEP_RECALL",
+            bool(memory.get("step_recall_enabled", True)),
+        ),
+        memory_step_recall_top_k=int(memory.get("step_recall_top_k", 3)),
+        memory_consolidation_enabled=_env_bool(
+            "HARNESS_MEMORY_CONSOLIDATION",
+            bool(memory.get("consolidation_enabled", True)),
+        ),
+        memory_consolidation_async=_env_bool(
+            "HARNESS_MEMORY_CONSOLIDATION_ASYNC",
+            bool(memory.get("consolidation_async", True)),
+        ),
+        memory_consolidation_half_life_days=int(
+            memory.get("consolidation_half_life_days", 30)
+        ),
+        memory_consolidation_min_confidence=float(
+            memory.get("consolidation_min_confidence", 0.25)
+        ),
+        memory_consolidation_promote_min_sessions=int(
+            memory.get("consolidation_promote_min_sessions", 2)
+        ),
+        memory_purge_after_days=int(memory.get("purge_after_days", 180)),
         validation_strict_mode=_env_bool(
             "HARNESS_VALIDATION_STRICT",
             bool(validation.get("strict_mode", False)),

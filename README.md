@@ -55,7 +55,7 @@ Layer 1  工具层     MCP Registry + Tavily MCP Server(stdio) + MySQL + RAGFlow
 | 结果校验 | step + finalize 双层校验 | `app/agent/harness/validator.py` |
 | 失败恢复 | 结构化 hint + 重试上限 | `app/agent/harness/recovery.py` |
 | 上下文压缩 | LLM 摘要 + 截断降级 | `app/agent/harness/compressor.py` |
-| 跨会话记忆 | recall/remember（Mem0 或本地 JSON） | `app/agent/memory/` |
+| 跨会话记忆 | 分层 Memory：身份四元组 + 信任分级 + 来源台账 + SUPERSEDE | `app/agent/memory/` `docs/MEMORY_ARCHITECTURE.md` |
 | MCP 工具发现 | Registry + **真 stdio MCP Server（Tavily）** | `app/mcp/` |
 | 可观测性 | WebSocket + Langfuse + JSONL 日志 | `app/api/monitor.py` `tracing.py` `trace_logger.py` |
 | 评测回归 | 10 条 golden task + 8 项指标 + baseline | `tests/eval/` + CI |
@@ -479,7 +479,7 @@ git checkout main
 - 显式 per-step Harness Loop + 校验恢复 + 上下文压缩
 - golden task 评测（8 指标）+ baseline 回归 + GitHub Actions CI
 - MCP Registry + Tavily 真 MCP Server（stdio）
-- 跨会话记忆（Mem0 可选 / 本地 JSON 降级）
+- 跨会话记忆（SQLite + 请求级身份 + 信任分级 + 来源台账；Mem0 可选）
 - Langfuse trace（可选）+ JSONL 结构化日志 + `GET /health`
 - `harness.yml` 配置化 + budget 守卫
 - **HITL 人工审批**（`interrupt_on` + step gate + 前端审批卡片）

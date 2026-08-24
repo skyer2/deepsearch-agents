@@ -40,8 +40,10 @@ class MemoryAuditLog:
         self._ensure_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
     def _ensure_schema(self) -> None:
@@ -70,23 +72,26 @@ class MemoryAuditLog:
         action: str,
         record_id: Optional[str] = None,
         detail: Optional[dict[str, Any]] = None,
+        conn: Optional[sqlite3.Connection] = None,
     ) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO memory_audit (tenant_id, user_id, record_id, action, detail, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    tenant_id,
-                    user_id,
-                    record_id,
-                    action,
-                    json.dumps(detail or {}, ensure_ascii=False),
-                    datetime.now(timezone.utc).isoformat(),
-                ),
-            )
-            conn.commit()
+        payload = (
+            tenant_id,
+            user_id,
+            record_id,
+            action,
+            json.dumps(detail or {}, ensure_ascii=False),
+            datetime.now(timezone.utc).isoformat(),
+        )
+        sql = """
+            INSERT INTO memory_audit (tenant_id, user_id, record_id, action, detail, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """
+        if conn is not None:
+            conn.execute(sql, payload)
+            return
+        with self._connect() as owned:
+            owned.execute(sql, payload)
+            owned.commit()
 
     def list_entries(
         self,

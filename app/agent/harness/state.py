@@ -176,6 +176,10 @@ class LoopState:
     memory_user_id: str = ""
     memory_tenant_id: str = "default"
     memory_wrap_untrusted: bool = False
+    # 【Phase 18】请求级身份与项目来源台账
+    memory_project_id: str = "default"
+    memory_identity_ephemeral: bool = False
+    memory_source_ledger: list[Any] = field(default_factory=list)
     tool_calls_count: int = 0
     step_validation_results: list[dict[str, Any]] = field(default_factory=list)
     compression_ratios: list[float] = field(default_factory=list)
@@ -206,6 +210,8 @@ class LoopState:
     obs_memory_saved_count: int = 0
     obs_memory_recall_at_k: float = 0.0
     obs_memory_embedding_used: bool = False
+    obs_memory_trust_filtered: int = 0
+    obs_memory_sources_recorded: int = 0
     # 【Phase 13】运行时护栏中止
     abort_reason: str = ""
     abort_message: str = ""

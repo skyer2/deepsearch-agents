@@ -198,6 +198,11 @@ async def collect_health() -> dict[str, Any]:
                 "wrap_untrusted": config.memory_wrap_untrusted,
                 "embedding_enabled": config.memory_embedding_enabled,
                 "step_incremental_enabled": config.memory_step_incremental_enabled,
+                "project_scope_enabled": config.memory_project_scope_enabled,
+                "require_explicit_identity": config.memory_require_explicit_identity,
+                "synthesis_min_trust": config.memory_synthesis_min_trust,
+                "source_ledger_enabled": config.memory_source_ledger_enabled,
+                "consolidation_enabled": config.memory_consolidation_enabled,
             },
             "guardrails": {
                 "max_tool_calls": config.max_tool_calls,

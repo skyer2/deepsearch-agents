@@ -63,7 +63,18 @@ from app.agent.harness.state import (
 )
 from app.agent.harness.validator import ResultValidator
 from app.agent.memory.extractor import MemoryExtractor
-from app.agent.memory.policy import get_memory_policy, resolve_memory_tenant_id, resolve_memory_user_id
+from app.agent.memory.identity import (
+    MemoryIdentity,
+    reset_memory_identity,
+    resolve_memory_identity,
+    set_memory_identity,
+)
+from app.agent.memory.models import MemoryType, MemoryWriteRequest, WriteSource
+from app.agent.memory.policy import (
+    SYNTHESIS_STEP_TYPES,
+    get_memory_policy,
+)
+from app.agent.memory.provenance import provenance_from_step
 from app.agent.memory.store import MemoryStore
 from app.api.context import (
     reset_session_context,
@@ -109,7 +120,15 @@ class AgentHarness:
         self._current_tracer: Optional[HarnessTracer] = None
         self._current_trace_id: str = ""
 
-    async def run(self, task_query: str, session_id: str) -> HarnessResult:
+    async def run(
+        self,
+        task_query: str,
+        session_id: str,
+        *,
+        user_id: str = "",
+        tenant_id: str = "",
+        project_id: str = "",
+    ) -> HarnessResult:
         state = LoopState(session_id=session_id, max_retries=self.max_retries)
         state.metadata["strict_validation"] = self.harness_config.validation_strict_mode
         run_started = time.perf_counter()
@@ -125,9 +144,19 @@ class AgentHarness:
         idempotency = IdempotencyRegistry()
         state.task_fingerprint = task_query_fingerprint(task_query)
         memory_policy = get_memory_policy()
-        state.memory_user_id = resolve_memory_user_id(session_id)
-        state.memory_tenant_id = resolve_memory_tenant_id()
+        identity = resolve_memory_identity(
+            session_id,
+            user_id=user_id,
+            tenant_id=tenant_id,
+            project_id=project_id,
+        )
+        identity_token = set_memory_identity(identity)
+        state.memory_user_id = identity.user_id
+        state.memory_tenant_id = identity.tenant_id
+        state.memory_project_id = identity.project_id
+        state.memory_identity_ephemeral = identity.ephemeral
         state.memory_wrap_untrusted = memory_policy.wrap_untrusted
+        state.metadata["memory_identity"] = identity.to_dict()
 
         try:
             state = await self._phase_understand(state, task_query, bool(uploaded_prompt))
@@ -319,6 +348,7 @@ class AgentHarness:
         finally:
             self._current_tracer = None
             reset_session_context(tokens[0], tokens[1])
+            reset_memory_identity(identity_token)
 
     async def _execute_and_validate_step(
         self,
@@ -936,6 +966,7 @@ class AgentHarness:
             return state
 
         state = self._apply_hitl_decisions(state, decisions, step=None, step_index=-1)
+        await self._flush_hitl_memories(state)
         self._report_phase(
             Phase.UNDERSTAND,
             "clarification_resolved",
@@ -1028,6 +1059,7 @@ class AgentHarness:
             return state
 
         state = self._apply_hitl_decisions(state, decisions, step=None, step_index=-1)
+        await self._flush_hitl_memories(state)
         self._report_phase(
             Phase.PLAN,
             "resumed",
@@ -1047,6 +1079,27 @@ class AgentHarness:
         """【Phase 6】统一处理 approve / reject / edit 决策。"""
         for decision in decisions:
             dtype = decision.get("type", "approve")
+            if dtype in {"approve", "reject", "edit"}:
+                pending = list(state.metadata.get("pending_hitl_memories") or [])
+                gate = "step" if step is not None else "plan_or_intent"
+                if dtype == "reject" and step is not None:
+                    pending.append(
+                        {
+                            "fact": f"用户拒绝了步骤 {step.step_type}：{step.description[:80]}",
+                            "gate": gate,
+                            "decision": dtype,
+                        }
+                    )
+                elif dtype == "edit":
+                    pending.append(
+                        {
+                            "fact": f"用户编辑了{'步骤 ' + step.step_type if step else '计划/意图'}，请在后续同类任务中优先遵循该修改",
+                            "gate": gate,
+                            "decision": dtype,
+                        }
+                    )
+                if pending:
+                    state.metadata["pending_hitl_memories"] = pending
             if dtype == "approve":
                 if state.intent and state.intent.needs_clarification:
                     state.intent.needs_clarification = False
@@ -1093,41 +1146,114 @@ class AgentHarness:
                     )
         return state
 
+    def _memory_identity(self, state: LoopState) -> MemoryIdentity:
+        return MemoryIdentity(
+            tenant_id=state.memory_tenant_id or "default",
+            user_id=state.memory_user_id,
+            project_id=getattr(state, "memory_project_id", "default") or "default",
+            session_id=state.session_id,
+            ephemeral=bool(getattr(state, "memory_identity_ephemeral", False)),
+        )
+
+    async def _maybe_step_recall(self, state: LoopState, step: PlanStep, task_query: str) -> None:
+        """合成步二次召回：只注入高信任记忆，避免脏网页结论进入报告。"""
+        policy = get_memory_policy()
+        if not policy.enabled or not policy.step_recall_enabled:
+            return
+        if step.step_type not in SYNTHESIS_STEP_TYPES:
+            return
+        identity = self._memory_identity(state)
+        result = await self.memory.recall_with_metrics(
+            task_query,
+            identity.user_id,
+            identity=identity,
+            top_k=policy.step_recall_top_k,
+            target_step_type=step.step_type,
+        )
+        if result.records:
+            state.memory_records = result.records
+            state.memory_facts = [r.fact for r in result.records if r.fact]
+            state.obs_memory_trust_filtered = result.trust_filtered
+
+    async def _flush_hitl_memories(self, state: LoopState) -> None:
+        pending = list(state.metadata.get("pending_hitl_memories") or [])
+        if not pending:
+            return
+        state.metadata["pending_hitl_memories"] = []
+        identity = self._memory_identity(state)
+        writes = [
+            MemoryWriteRequest(
+                fact=str(item.get("fact", "")),
+                memory_type=MemoryType.PROCEDURAL,
+                write_source=WriteSource.HITL,
+                task=state.intent.raw_query if state.intent else "",
+                session_id=state.session_id,
+                project_id=identity.project_id,
+                confidence=0.95,
+                metadata={"gate": item.get("gate", ""), "decision": item.get("decision", "")},
+            )
+            for item in pending
+            if str(item.get("fact", "")).strip()
+        ]
+        if not writes:
+            return
+        saved = await self.memory.remember_writes(writes, user_id=identity.user_id, identity=identity)
+        if saved:
+            state.obs_memory_saved_count += saved
+
     async def _maybe_remember_step(
         self,
         state: LoopState,
         step: PlanStep,
         result: StepResult,
     ) -> None:
-        """【Phase 15】检索步成功后步内增量写入 episodic/semantic fact。"""
+        """【Phase 15】检索步成功后步内增量写入；【Phase 18】必须带来源才写网页结论。"""
         policy = get_memory_policy()
         if not policy.enabled or not policy.step_incremental_enabled:
             return
         if step.step_type not in {"network_search", "database_query", "knowledge_base", "file_read"}:
             return
+        identity = self._memory_identity(state)
+        provenance = provenance_from_step(
+            step_type=step.step_type,
+            content=result.content,
+            metadata=result.metadata,
+            run_id=state.session_id,
+        )
         content = result.compressed_content or result.content
         writes = self.memory_extractor.extract_step_writes(
             content,
             step.step_type,
             session_id=state.session_id,
             task=state.intent.raw_query if state.intent else "",
+            project_id=identity.project_id,
+            provenance=provenance,
         )
-        if not writes:
-            return
-        saved = await self.memory.remember_writes(
-            writes,
-            user_id=state.memory_user_id,
-            tenant_id=state.memory_tenant_id,
-        )
-        if saved:
-            state.obs_memory_saved_count += saved
-            monitor.report_phase(
-                "memory",
-                "step_incremental",
-                session_id=state.session_id,
-                count=saved,
-                step_type=step.step_type,
+        if writes:
+            saved = await self.memory.remember_writes(
+                writes,
+                user_id=identity.user_id,
+                identity=identity,
             )
+            if saved:
+                state.obs_memory_saved_count += saved
+                monitor.report_phase(
+                    "memory",
+                    "step_incremental",
+                    session_id=state.session_id,
+                    count=saved,
+                    step_type=step.step_type,
+                    trust_tier=writes[0].resolved_trust_tier().value,
+                )
+        if provenance.source_urls:
+            recorded = await self.memory.record_sources(
+                provenance.source_urls,
+                identity=identity,
+                source_kind="url",
+                quality="mixed" if step.step_type == "network_search" else "reliable",
+                session_id=state.session_id,
+            )
+            state.obs_memory_sources_recorded += recorded
 
     async def _phase_build_context(self, state: LoopState, task_query: str) -> LoopState:
         started = time.perf_counter()
@@ -1137,10 +1263,11 @@ class AgentHarness:
 
         set_llm_phase(Phase.BUILD_CONTEXT.value)
 
+        identity = self._memory_identity(state)
         recalled_result = await self.memory.recall_with_metrics(
             task_query,
-            state.memory_user_id,
-            tenant_id=state.memory_tenant_id,
+            identity.user_id,
+            identity=identity,
             top_k=self.harness_config.memory_recall_top_k,
         )
         recalled = recalled_result.records
@@ -1150,6 +1277,8 @@ class AgentHarness:
         state.obs_memory_recalled_count = len(state.memory_facts)
         state.obs_memory_recall_at_k = recalled_result.recall_at_k
         state.obs_memory_embedding_used = recalled_result.embedding_used
+        state.obs_memory_trust_filtered = recalled_result.trust_filtered
+        state.memory_source_ledger = self.memory.list_sources(identity=identity)
         if state.memory_facts:
             monitor.report_phase(
                 "memory",
@@ -1157,7 +1286,9 @@ class AgentHarness:
                 session_id=state.session_id,
                 count=len(state.memory_facts),
                 source="recall",
-                user_id=state.memory_user_id,
+                user_id=identity.user_id,
+                project_id=identity.project_id,
+                trust_filtered=recalled_result.trust_filtered,
             )
 
         duration = int((time.perf_counter() - started) * 1000)
@@ -1167,6 +1298,7 @@ class AgentHarness:
             state=state,
             duration_ms=duration,
             memory_count=len(recalled),
+            source_ledger_count=len(state.memory_source_ledger),
         )
         return state
 
@@ -1196,6 +1328,8 @@ class AgentHarness:
         from app.agent.harness.usage_tracker import set_llm_phase
 
         set_llm_phase(Phase.EXECUTE.value)
+
+        await self._maybe_step_recall(state, step, task_query)
 
         if not await self._maybe_step_hitl_gate(state, step, step_index):
             duration = int((time.perf_counter() - started) * 1000)
@@ -1383,6 +1517,7 @@ class AgentHarness:
             approved = False
         else:
             state = self._apply_hitl_decisions(state, decisions, step, step_index)
+            await self._flush_hitl_memories(state)
             approved = True
 
         self._report_phase(
@@ -1442,6 +1577,7 @@ class AgentHarness:
             )
             if any(d.get("type") == "edit" for d in decisions):
                 state = self._apply_hitl_decisions(state, decisions, None, step_index)
+                await self._flush_hitl_memories(state)
             await self.agent.ainvoke(
                 Command(resume={"decisions": decisions}),
                 config=config,
@@ -1633,20 +1769,29 @@ class AgentHarness:
         saved = 0
         policy = get_memory_policy()
         should_remember = success or policy.remember_on_partial
+        identity = self._memory_identity(state)
         if should_remember and state.final_content.strip():
+            provenance = provenance_from_step(
+                step_type="finalize",
+                content=state.final_content,
+                metadata={"evidence_sources": []},
+                run_id=state.session_id,
+            )
             writes = await self.memory_extractor.extract_writes(
                 state.final_content,
                 max_facts=self.harness_config.memory_max_facts_per_remember,
                 task=state.intent.raw_query if state.intent else "",
                 topic=(state.intent.summary if state.intent else "")[:120],
                 session_id=state.session_id,
+                project_id=identity.project_id,
+                provenance=provenance,
             )
             saved = await self.memory.remember_writes(
                 writes,
-                user_id=state.memory_user_id,
-                tenant_id=state.memory_tenant_id,
+                user_id=identity.user_id,
+                identity=identity,
             )
-        state.obs_memory_saved_count = saved
+        state.obs_memory_saved_count += saved
         if saved:
             monitor.report_phase(
                 "memory",
@@ -1655,6 +1800,17 @@ class AgentHarness:
                 count=saved,
                 source="remember",
             )
+
+        if policy.consolidation_enabled:
+            try:
+                if policy.consolidation_async:
+                    asyncio.create_task(
+                        self.memory.consolidate(user_id=identity.user_id, identity=identity)
+                    )
+                else:
+                    await self.memory.consolidate(user_id=identity.user_id, identity=identity)
+            except Exception as exc:
+                print(f"[Memory] consolidation skipped: {exc}")
 
         if state.final_content:
             monitor.report_task_result(state.final_content)
@@ -1699,12 +1855,16 @@ class AgentHarness:
                 "step_success_rate": round(step_success_rate, 3),
                 "avg_compression_ratio": round(avg_compression, 3),
                 "memory_recalled": state.memory_recalled,
-                "memory_saved_count": saved,
+                "memory_saved_count": state.obs_memory_saved_count,
                 "memory_user_id": state.memory_user_id,
                 "memory_tenant_id": state.memory_tenant_id,
+                "memory_project_id": state.memory_project_id,
+                "memory_identity_ephemeral": state.memory_identity_ephemeral,
                 "memory_recalled_count": getattr(state, "obs_memory_recalled_count", 0),
                 "memory_recall_at_k": getattr(state, "obs_memory_recall_at_k", 0.0),
                 "memory_embedding_used": getattr(state, "obs_memory_embedding_used", False),
+                "memory_trust_filtered": getattr(state, "obs_memory_trust_filtered", 0),
+                "memory_sources_recorded": getattr(state, "obs_memory_sources_recorded", 0),
                 "step_validation_results": state.step_validation_results,
                 "replan_count": state.replan_count,
                 "citation_coverage_rate": state.citation_coverage_rate,

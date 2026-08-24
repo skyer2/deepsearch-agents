@@ -90,6 +90,9 @@ class TaskRequest(BaseModel):
 
     query: str
     thread_id: str = None
+    user_id: str = ""
+    tenant_id: str = ""
+    project_id: str = ""
 
 
 class HitlDecision(BaseModel):
@@ -134,7 +137,15 @@ async def run_task(request: TaskRequest):
         old_task.cancel()
 
     # create_task 把长耗时 Agent 执行交给事件循环，接口本身不用等待最终结果
-    task = asyncio.create_task(run_deep_agent(request.query, thread_id))
+    task = asyncio.create_task(
+        run_deep_agent(
+            request.query,
+            thread_id,
+            user_id=request.user_id or "",
+            tenant_id=request.tenant_id or "",
+            project_id=request.project_id or "",
+        )
+    )
     active_tasks[thread_id] = task
     task.add_done_callback(lambda finished_task: _forget_task(thread_id, finished_task))
 

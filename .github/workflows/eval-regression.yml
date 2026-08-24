@@ -46,6 +46,12 @@ jobs:
       - name: Phase 12 memory tests
         run: uv run python tests/test_harness_phase12_memory.py
 
+      - name: Phase 15 memory tests
+        run: uv run python tests/test_harness_phase15_memory.py
+
+      - name: Phase 18 enterprise memory tests
+        run: uv run python tests/test_harness_phase18_memory.py
+
       - name: Phase 13 harness guardrail tests
         run: uv run python tests/test_harness_phase13_guardrails.py
 

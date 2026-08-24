@@ -71,10 +71,16 @@ harness = AgentHarness(
 )
 
 
-async def run_deep_agent(task_query, session_id):
+async def run_deep_agent(task_query, session_id, *, user_id="", tenant_id="", project_id=""):
     """异步执行入口 — 委托给 AgentHarness。"""
     print(f"[MainAgent] Harness 开始执行，session_id={session_id}")
-    result = await harness.run(task_query, session_id)
+    result = await harness.run(
+        task_query,
+        session_id,
+        user_id=user_id,
+        tenant_id=tenant_id,
+        project_id=project_id,
+    )
     print(
         f"[MainAgent] Harness 完成，status={result.status}, "
         f"retries={result.retry_count}, artifacts={result.artifacts}, "

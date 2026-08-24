@@ -1,19 +1,26 @@
 """
 【Phase 15】JSON 记忆后端 — 开发降级；无 embedding / 审计 / 软删除完整能力。
+【Phase 18】对齐新接口签名；写入走同一套 consolidation 决策。
 """
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from app.agent.memory.backend.base import MemoryBackend
+from app.agent.memory.consolidation import (
+    ConsolidationAction,
+    apply_update,
+    decide_write_action,
+)
 from app.agent.memory.models import (
     MemoryRecord,
+    MemoryType,
     MemoryWriteRequest,
     RecallResult,
-    WriteSource,
+    SourceLedgerEntry,
 )
 from app.agent.memory.policy import MemoryPolicy
 from app.agent.memory.recall.hybrid import hybrid_recall
@@ -31,10 +38,18 @@ class JsonMemoryBackend(MemoryBackend):
         safe_u = "".join(c if c.isalnum() or c in "-_" else "_" for c in user_id)
         return self.storage_dir / f"{safe_t}__{safe_u}.json"
 
+    def _ledger_path(self, tenant_id: str, user_id: str, project_id: str) -> Path:
+        safe_t = "".join(c if c.isalnum() or c in "-_" else "_" for c in tenant_id)
+        safe_u = "".join(c if c.isalnum() or c in "-_" else "_" for c in user_id)
+        safe_p = "".join(c if c.isalnum() or c in "-_" else "_" for c in project_id)
+        return self.storage_dir / f"{safe_t}__{safe_u}__{safe_p}.sources.json"
+
     def _load(self, tenant_id: str, user_id: str) -> list[MemoryRecord]:
         path = self._path(tenant_id, user_id)
         if not path.exists():
             return []
+        import json
+
         raw = json.loads(path.read_text(encoding="utf-8"))
         records: list[MemoryRecord] = []
         for item in raw:
@@ -48,8 +63,10 @@ class JsonMemoryBackend(MemoryBackend):
         return records
 
     def _save(self, tenant_id: str, user_id: str, records: list[MemoryRecord]) -> None:
+        import json
+
         path = self._path(tenant_id, user_id)
-        payload = [r.to_dict() for r in records if not r.is_deleted]
+        payload = [r.to_dict() for r in records]
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     async def recall(
@@ -59,9 +76,20 @@ class JsonMemoryBackend(MemoryBackend):
         tenant_id: str,
         user_id: str,
         top_k: int,
+        project_id: str = "",
+        memory_types: Optional[list[MemoryType]] = None,
+        target_step_type: str = "",
     ) -> RecallResult:
         records = self._load(tenant_id, user_id)
-        return await hybrid_recall(query, records, policy=self.policy, top_k=top_k)
+        return await hybrid_recall(
+            query,
+            records,
+            policy=self.policy,
+            top_k=top_k,
+            memory_types=memory_types,
+            project_id=project_id,
+            target_step_type=target_step_type,
+        )
 
     async def remember_writes(
         self,
@@ -69,37 +97,53 @@ class JsonMemoryBackend(MemoryBackend):
         *,
         tenant_id: str,
         user_id: str,
+        project_id: str = "",
     ) -> int:
         records = self._load(tenant_id, user_id)
-        existing_facts = {r.fact for r in records if not r.is_deleted}
         saved = 0
         now = datetime.now(timezone.utc).isoformat()
         for write in writes[: self.policy.max_facts_per_remember]:
+            if project_id and not write.project_id:
+                write.project_id = project_id
             fact = write.fact.strip()
             if len(fact) < self.policy.min_fact_chars:
                 continue
             if self.policy.pii_redact_enabled and contains_pii(fact):
                 fact = redact_pii(fact)
-            if fact in existing_facts:
+                write.fact = fact
+            if len(fact) < self.policy.min_fact_chars:
                 continue
-            records.append(
-                MemoryRecord(
-                    tenant_id=tenant_id,
-                    user_id=user_id,
-                    fact=fact,
-                    memory_type=write.memory_type,
-                    confidence=write.confidence,
-                    write_source=write.write_source,
-                    task=write.task,
-                    topic=write.topic,
-                    session_id=write.session_id,
-                    metadata=write.metadata,
-                    created_at=now,
-                    updated_at=now,
-                    source="remember",
-                )
+            decision = decide_write_action(write, records, policy=self.policy)
+            if decision.action == ConsolidationAction.NOOP:
+                continue
+            if decision.action == ConsolidationAction.UPDATE and decision.target:
+                apply_update(decision.target, write)
+                saved += 1
+                continue
+            record = MemoryRecord(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                fact=fact,
+                memory_type=write.memory_type,
+                confidence=write.confidence,
+                write_source=write.write_source,
+                task=write.task,
+                topic=write.topic,
+                session_id=write.session_id,
+                metadata=write.metadata,
+                created_at=now,
+                updated_at=now,
+                source="remember",
+                project_id=write.project_id or "default",
+                trust_tier=write.resolved_trust_tier(),
+                provenance=write.resolved_provenance(),
+                dedup_key=write.dedup_key,
             )
-            existing_facts.add(fact)
+            if decision.action == ConsolidationAction.SUPERSEDE and decision.target:
+                decision.target.is_deleted = True
+                decision.target.superseded_by = record.id
+                record.supersedes = [decision.target.id]
+            records.append(record)
             saved += 1
         self._save(tenant_id, user_id, records)
         return saved
@@ -110,11 +154,16 @@ class JsonMemoryBackend(MemoryBackend):
         tenant_id: str,
         user_id: str,
         include_deleted: bool = False,
+        project_id: str = "",
     ) -> list[MemoryRecord]:
         records = self._load(tenant_id, user_id)
         if not include_deleted:
             records = [r for r in records if not r.is_deleted]
-        return [r for r in records if not r.is_expired(self.policy.ttl_days)]
+        if project_id and project_id != "default":
+            preferred = [r for r in records if r.project_id == project_id]
+            others = [r for r in records if r.project_id != project_id]
+            records = preferred + others
+        return [r for r in records if include_deleted or not r.is_expired(self.policy.ttl_days)]
 
     async def delete_record(
         self,
@@ -152,3 +201,63 @@ class JsonMemoryBackend(MemoryBackend):
         if count:
             self._save(tenant_id, user_id, records)
         return count
+
+    async def upsert_source_ledger(self, entries: list[SourceLedgerEntry]) -> int:
+        if not entries:
+            return 0
+        import json
+
+        saved = 0
+        grouped: dict[tuple[str, str, str], list[SourceLedgerEntry]] = {}
+        for entry in entries:
+            key = (entry.tenant_id, entry.user_id, entry.project_id)
+            grouped.setdefault(key, []).append(entry)
+        for (tid, uid, pid), group in grouped.items():
+            path = self._ledger_path(tid, uid, pid)
+            existing: dict[str, dict] = {}
+            if path.exists():
+                try:
+                    raw = json.loads(path.read_text(encoding="utf-8"))
+                    existing = {item["id"]: item for item in raw if isinstance(item, dict) and item.get("id")}
+                except Exception:
+                    existing = {}
+            now = datetime.now(timezone.utc).isoformat()
+            for entry in group:
+                prev = existing.get(entry.id)
+                if prev:
+                    prev["hit_count"] = int(prev.get("hit_count") or 1) + 1
+                    prev["last_used_at"] = now
+                    if entry.quality != "unknown":
+                        prev["quality"] = entry.quality
+                else:
+                    payload = entry.to_dict()
+                    payload["first_seen_at"] = now
+                    payload["last_used_at"] = now
+                    existing[entry.id] = payload
+                saved += 1
+            path.write_text(
+                json.dumps(list(existing.values()), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        return saved
+
+    def list_source_ledger(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        project_id: str,
+        limit: int = 8,
+    ) -> list[SourceLedgerEntry]:
+        import json
+
+        path = self._ledger_path(tenant_id, user_id, project_id)
+        if not path.exists():
+            return []
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        entries = [SourceLedgerEntry.from_dict(item) for item in raw if isinstance(item, dict)]
+        entries.sort(key=lambda e: e.last_used_at, reverse=True)
+        return entries[:limit]

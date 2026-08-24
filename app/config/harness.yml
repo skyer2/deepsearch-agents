@@ -32,6 +32,22 @@ harness:
     pii_redact_enabled: true
     step_incremental_enabled: true   # 检索步成功后步内增量写入
     remember_on_partial: false       # 仅 success 时 finalize 写入
+    # 【Phase 18】企业级分层记忆
+    project_scope_enabled: true      # 同项目记忆加权，避免重复检索
+    require_explicit_identity: false # 生产建议 true：拒绝 session 退化身份写入
+    min_recall_trust: "untrusted"    # 常规召回最低信任：untrusted|derived|trusted
+    synthesis_min_trust: "derived"   # 写报告二次召回最低信任
+    require_provenance_for_step_write: true  # 网页步无 URL 不写长期记忆
+    source_ledger_enabled: true      # 项目已查来源台账
+    source_ledger_max_inject: 8
+    step_recall_enabled: true        # 合成步二次召回
+    step_recall_top_k: 3
+    consolidation_enabled: true      # finalize 后衰减/晋升/硬清理
+    consolidation_async: true
+    consolidation_half_life_days: 30
+    consolidation_min_confidence: 0.25
+    consolidation_promote_min_sessions: 2
+    purge_after_days: 180
 
   validation:
     strict_mode: false         # true = step warning 也算失败
