@@ -7,11 +7,13 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 from app.agent.harness.context_budget import (
     ContextBuildSettings,
     StepMessageMetrics,
+    fit_layers_to_token_budget,
+    join_layers,
     measure_layers,
     trim_text_to_token_budget,
     wrap_untrusted_block,
@@ -49,6 +51,9 @@ class ContextBuilder:
                 wrap_untrusted_external=cfg.context_wrap_untrusted_external,
                 layer_budget_log_enabled=cfg.context_layer_budget_log_enabled,
                 compress_threshold_chars=cfg.compression_threshold_chars,
+                layer_priority_eviction=cfg.context_layer_priority_eviction,
+                evidence_lookup_enabled=cfg.context_evidence_lookup_enabled,
+                working_notes_enabled=cfg.context_working_notes_enabled,
             )
         )
 
@@ -157,6 +162,7 @@ class ContextBuilder:
     2. 读取已上传的文件时，请直接将文件名作为 filename 参数传入 read_file_content
     3. 使用相对路径，禁止使用绝对路径
     4. 若存在上传文件，请先分析内容
+    5. 写报告时可读取 working_notes.md 与 evidence.json 核对数字和来源
     """
 
     def build_plan_instruction(self, plan: ExecutionPlan) -> str:
@@ -298,6 +304,18 @@ class ContextBuilder:
     要求: 只完成当前步骤，{agent_hint}{parallel_note}
     """
 
+    def build_working_notes_context(self, notes: str) -> str:
+        if not self.settings.working_notes_enabled or not (notes or "").strip():
+            return ""
+        return notes
+
+    def build_evidence_lookup_context(self, lookup_block: str, step_type: str) -> str:
+        if not self.settings.evidence_lookup_enabled:
+            return ""
+        if step_type not in SYNTHESIS_STEP_TYPES:
+            return ""
+        return lookup_block or ""
+
     def build_step_message(
         self,
         task_query: str,
@@ -317,11 +335,16 @@ class ContextBuilder:
         layer_parts = {
             "task_query": task_query,
             "intent": self.build_intent_instruction(state.intent) if state.intent else "",
+            "notes": self.build_working_notes_context(getattr(state, "working_notes", "") or ""),
             "memory": self.build_memory_context(
                 state.memory_facts,
                 records=state.memory_records,
                 wrap_untrusted=getattr(state, "memory_wrap_untrusted", False),
                 source_ledger=getattr(state, "memory_source_ledger", None),
+            ),
+            "evidence": self.build_evidence_lookup_context(
+                getattr(state, "evidence_lookup_block", "") or "",
+                step.step_type,
             ),
             "prior_results": self.build_prior_results_context(
                 state,
@@ -339,20 +362,24 @@ class ContextBuilder:
                 f"\n    【恢复提示】\n    {hint}" for hint in state.recovery_hints
             ),
         }
-        parts = [layer_parts[k] for k in layer_parts if layer_parts[k]]
-        message = "\n".join(p for p in parts if p.strip())
+        metrics = measure_layers(layer_parts)
+        metrics.truncated_prior_steps = getattr(self, "_last_truncated_prior", 0)
+        metrics.used_evidence_digest = getattr(self, "_last_used_digest", False)
 
-        if self.settings.layer_budget_log_enabled:
-            metrics = measure_layers(layer_parts)
+        if metrics.total_tokens > self.settings.max_step_message_tokens:
+            message, metrics = fit_layers_to_token_budget(
+                layer_parts,
+                self.settings.max_step_message_tokens,
+                enabled=self.settings.layer_priority_eviction,
+            )
             metrics.truncated_prior_steps = getattr(self, "_last_truncated_prior", 0)
             metrics.used_evidence_digest = getattr(self, "_last_used_digest", False)
-            if metrics.total_tokens > self.settings.max_step_message_tokens:
-                message = trim_text_to_token_budget(
-                    message,
-                    self.settings.max_step_message_tokens,
-                )
-                metrics.total_tokens = self.settings.max_step_message_tokens
-                metrics.layers["budget_trimmed"] = 1
+        else:
+            message = join_layers(layer_parts)
+
+        if self.settings.layer_budget_log_enabled:
+            self.last_step_metrics = metrics
+        else:
             self.last_step_metrics = metrics
 
         return message

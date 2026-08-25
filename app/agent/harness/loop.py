@@ -13,6 +13,7 @@ Agent Harness 主循环
 【Phase 15】生产级 Memory：SQLite + Hybrid Recall + 类型化 fact + 步内增量 + 治理/审计。
 【Phase 13】运行时护栏：墙钟时限、重规划上限、计划步数上限、标准化 abort_reason。
 【Phase 14】结构化槽位 + 置信度 + HITL 歧义澄清 + 默认 LLM Planner + Plan 校验强化。
+【Phase 19】窗口卫生、分层预算淘汰、工作笔记、证据回读、压缩保留检查。
 """
 
 import asyncio
@@ -22,6 +23,12 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from app.agent.harness.window_hygiene import (
+    apply_checkpoint_tool_hygiene,
+    parallel_graph_thread_id,
+    step_graph_thread_id,
+)
+from app.agent.harness.working_notes import render_working_notes, write_working_notes_file
 from app.agent.harness.citations import CitationManager
 from app.agent.harness.compressor import ContextCompressor
 from app.agent.harness.context_builder import ContextBuilder
@@ -50,7 +57,6 @@ from app.agent.harness.orchestration import (
 from app.agent.harness.guardrails import can_replan, evaluate_run_guardrails
 from app.agent.harness.observability import build_observability_snapshot
 from app.agent.harness.planner_llm import build_plan_for_intent, understand_intent
-from app.agent.llm import compression_model
 from app.agent.harness.recovery import RecoveryManager
 from app.agent.harness.state import (
     HarnessResult,
@@ -107,7 +113,11 @@ class AgentHarness:
         self.project_root = project_root
         self.validator = validator or ResultValidator()
         self.recovery = recovery or RecoveryManager()
-        self.compressor = compressor or ContextCompressor()
+        self.compressor = compressor or ContextCompressor(
+            retention_check=self.harness_config.compression_retention_check,
+            min_url_retention=self.harness_config.compression_retention_min_url,
+            min_number_retention=self.harness_config.compression_retention_min_number,
+        )
         self.context_builder = context_builder or ContextBuilder.from_harness_config()
         self.memory = memory or MemoryStore()
         self.memory_extractor = memory_extractor or MemoryExtractor()
@@ -119,6 +129,56 @@ class AgentHarness:
         )
         self._current_tracer: Optional[HarnessTracer] = None
         self._current_trace_id: str = ""
+
+    def _graph_thread_id(self, session_id: str, step_index: int, *, parallel: bool = False) -> str:
+        if not self.harness_config.context_fresh_thread_per_step:
+            return session_id
+        if parallel:
+            return parallel_graph_thread_id(session_id, step_index)
+        return step_graph_thread_id(session_id, step_index)
+
+    def _refresh_working_memory(
+        self,
+        state: LoopState,
+        citation_manager: Optional[CitationManager],
+        session_dir: Optional[Path] = None,
+        task_query: str = "",
+    ) -> None:
+        sources = citation_manager.sources if citation_manager is not None else []
+        query = task_query or (state.intent.raw_query if state.intent else "")
+        if self.harness_config.context_working_notes_enabled:
+            state.working_notes = render_working_notes(
+                task_query=query,
+                step_results=state.step_results,
+                evidence_sources=sources,
+            )
+            if session_dir is not None:
+                try:
+                    write_working_notes_file(session_dir, state.working_notes)
+                except Exception as exc:
+                    print(f"[Context] working_notes write skipped: {exc}")
+        if citation_manager is not None and self.harness_config.context_evidence_lookup_enabled:
+            state.evidence_lookup_block = citation_manager.build_lookup_block()
+            state.evidence_lookup = citation_manager.to_dict_list()
+            if session_dir is not None:
+                try:
+                    citation_manager.save_evidence_json(session_dir)
+                except Exception as exc:
+                    print(f"[Context] evidence.json write skipped: {exc}")
+
+    async def _hygiene_checkpoint_messages(
+        self,
+        config: dict[str, Any],
+        state: LoopState,
+        snapshot: Any = None,
+    ) -> int:
+        """把过长 tool_result 换成占位符，按 message id 写回 checkpoint，供 HITL resume 继续。"""
+        if not getattr(self.harness_config, "context_clear_bulky_tool_results", True):
+            return 0
+        cleared = await apply_checkpoint_tool_hygiene(self.agent, config, snapshot=snapshot)
+        if cleared:
+            state.obs_tool_results_cleared += cleared
+        return cleared
 
     async def run(
         self,
@@ -294,6 +354,9 @@ class AgentHarness:
                 state.citation_coverage_rate = metrics["citation_coverage_rate"]
                 state.hallucination_rate = metrics["hallucination_rate"]
                 state.evidence_source_count = metrics["registered_sources"]
+                state.numeric_citation_coverage = float(
+                    metrics.get("numeric_citation_coverage") or 0.0
+                )
                 citation_manager.save_evidence_json(session_dir)
 
             finalize_outcome = self.validator.validate_finalize(
@@ -499,11 +562,15 @@ class AgentHarness:
                 session_dir,
                 citation_manager,
                 timeout_sec=timeout_sec,
+                run_session_id=self._graph_thread_id(session_id, step_index),
             )
             if passed:
                 state.step_results.append(result)
                 state.final_content = result.compressed_content or result.content
                 await self._maybe_remember_step(state, step, result)
+                self._refresh_working_memory(
+                    state, citation_manager, session_dir, task_query
+                )
                 if idempotency is not None:
                     idempotency.register(idem_key, result)
                 state.completed_step_keys.append(idem_key)
@@ -582,6 +649,8 @@ class AgentHarness:
             child_state.assistants_called = []
             child_state.compression_ratios = []
             child_state.tool_calls_count = 0
+            child_state.obs_entity_retention_rates = []
+            child_state.graph_thread_ids = []
             for field_name in (
                 "obs_structured_checks",
                 "obs_structured_passes",
@@ -592,6 +661,9 @@ class AgentHarness:
                 "obs_estimated_tokens_saved",
                 "obs_step_message_tokens_peak",
                 "obs_context_budget_trims",
+                "obs_fresh_threads",
+                "obs_retention_patches",
+                "obs_tool_results_cleared",
             ):
                 setattr(child_state, field_name, 0)
 
@@ -609,7 +681,9 @@ class AgentHarness:
                         None,
                         timeout_sec=timeout_sec,
                         context_builder=ContextBuilder.from_harness_config(),
-                        run_session_id=f"{session_id}:parallel:{idx}",
+                        run_session_id=self._graph_thread_id(
+                            session_id, idx, parallel=True
+                        ),
                     )
             except Exception as exc:
                 result = StepResult(
@@ -663,6 +737,14 @@ class AgentHarness:
                         source_meta["source_ids"] = [
                             source.source_id for source in registered
                         ]
+                payload = (result.metadata or {}).get("worker_payload") or {}
+                if isinstance(payload, dict):
+                    citation_manager.bind_worker_facts(
+                        idx,
+                        result.step_type,
+                        list(payload.get("facts") or []),
+                        list(payload.get("sources") or []),
+                    )
             state.step_results.append(result)
             step = state.plan.steps[idx]
             await self._maybe_remember_step(state, step, result)
@@ -675,6 +757,7 @@ class AgentHarness:
         if ordered:
             last_result = ordered[-1][1]
             state.final_content = last_result.compressed_content or last_result.content
+        self._refresh_working_memory(state, citation_manager, session_dir, task_query)
 
         if all_passed and checkpoint_store is not None:
             next_index = batch_indices[-1] + 1
@@ -707,6 +790,9 @@ class AgentHarness:
             "obs_unauthorized_tool_hits",
             "obs_estimated_tokens_saved",
             "obs_context_budget_trims",
+            "obs_fresh_threads",
+            "obs_retention_patches",
+            "obs_tool_results_cleared",
         ):
             setattr(
                 parent,
@@ -717,6 +803,10 @@ class AgentHarness:
             parent.obs_step_message_tokens_peak,
             child.obs_step_message_tokens_peak,
         )
+        parent.obs_entity_retention_rates.extend(
+            getattr(child, "obs_entity_retention_rates", []) or []
+        )
+        parent.graph_thread_ids.extend(getattr(child, "graph_thread_ids", []) or [])
 
     def _enrich_worker_result(
         self,
@@ -876,6 +966,8 @@ class AgentHarness:
 
         set_llm_session(state.session_id)
         set_llm_phase(Phase.UNDERSTAND.value)
+
+        from app.agent.llm import compression_model
 
         state.intent = await understand_intent(
             task_query,
@@ -1365,7 +1457,7 @@ class AgentHarness:
                 state.obs_step_message_tokens_peak,
                 step_ctx_metrics.total_tokens,
             )
-            if step_ctx_metrics.layers.get("budget_trimmed"):
+            if step_ctx_metrics.layers.get("budget_trimmed") or step_ctx_metrics.evictions:
                 state.obs_context_budget_trims += 1
             self._report_phase(
                 Phase.EXECUTE,
@@ -1373,9 +1465,14 @@ class AgentHarness:
                 state=state,
                 step_index=step_index,
                 context_metrics=step_ctx_metrics.to_dict(),
+                graph_thread_id=run_session_id or session_id,
             )
+        graph_thread = run_session_id or session_id
+        if graph_thread != session_id:
+            state.obs_fresh_threads += 1
+            state.graph_thread_ids.append(graph_thread)
         config = build_run_config(
-            run_session_id or session_id,
+            graph_thread,
             metadata={
                 "phase": "execute",
                 "step_index": step_index,
@@ -1425,6 +1522,7 @@ class AgentHarness:
                         if isinstance(content, str):
                             final_content = content
 
+        await self._hygiene_checkpoint_messages(config, state)
         await self._await_hitl_interrupt_resumes(config, state, step_index)
         snapshot = await self.agent.aget_state(config)
         if snapshot is not None:
@@ -1578,6 +1676,7 @@ class AgentHarness:
             if any(d.get("type") == "edit" for d in decisions):
                 state = self._apply_hitl_decisions(state, decisions, None, step_index)
                 await self._flush_hitl_memories(state)
+            await self._hygiene_checkpoint_messages(config, state, snapshot)
             await self.agent.ainvoke(
                 Command(resume={"decisions": decisions}),
                 config=config,
@@ -1657,6 +1756,17 @@ class AgentHarness:
                 if registered
                 else []
             )
+            payload = (result.metadata or {}).get("worker_payload") or {}
+            if isinstance(payload, dict):
+                bound = citation_manager.bind_worker_facts(
+                    step_index,
+                    result.step_type,
+                    list(payload.get("facts") or []),
+                    list(payload.get("sources") or []),
+                )
+                if bound:
+                    extra_ids = [s.source_id for s in bound]
+                    source_meta["source_ids"] = list(source_meta.get("source_ids") or []) + extra_ids
 
         compressed, meta = await self.compressor.compress(
             result.content,
@@ -1674,6 +1784,11 @@ class AgentHarness:
                 state.obs_estimated_tokens_saved += max(
                     1, (original_chars - compressed_chars) // 4
                 )
+        retention = meta.get("entity_retention")
+        if isinstance(retention, (int, float)):
+            state.obs_entity_retention_rates.append(float(retention))
+        if meta.get("retention_patched"):
+            state.obs_retention_patches += 1
 
         duration = int((time.perf_counter() - started) * 1000)
         self._report_phase(
@@ -1868,6 +1983,20 @@ class AgentHarness:
                 "step_validation_results": state.step_validation_results,
                 "replan_count": state.replan_count,
                 "citation_coverage_rate": state.citation_coverage_rate,
+                "numeric_citation_coverage": getattr(state, "numeric_citation_coverage", 0.0),
+                "entity_retention_avg": round(
+                    (
+                        sum(state.obs_entity_retention_rates)
+                        / len(state.obs_entity_retention_rates)
+                    )
+                    if state.obs_entity_retention_rates
+                    else 1.0,
+                    3,
+                ),
+                "retention_patches": state.obs_retention_patches,
+                "fresh_threads": state.obs_fresh_threads,
+                "tool_results_cleared": state.obs_tool_results_cleared,
+                "graph_thread_ids": list(state.graph_thread_ids),
                 "hallucination_rate": state.hallucination_rate,
                 "evidence_source_count": state.evidence_source_count,
                 "resumed_from_checkpoint": state.resumed_from_checkpoint,

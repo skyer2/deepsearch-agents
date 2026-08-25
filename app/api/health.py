@@ -189,6 +189,12 @@ async def collect_health() -> dict[str, Any]:
                 "prior_results_max_steps": config.context_prior_results_max_steps,
                 "wrap_untrusted_external": config.context_wrap_untrusted_external,
                 "compression_threshold_chars": config.compression_threshold_chars,
+                "fresh_thread_per_step": config.context_fresh_thread_per_step,
+                "layer_priority_eviction": config.context_layer_priority_eviction,
+                "working_notes_enabled": config.context_working_notes_enabled,
+                "evidence_lookup_enabled": config.context_evidence_lookup_enabled,
+                "clear_bulky_tool_results": config.context_clear_bulky_tool_results,
+                "retention_check": config.compression_retention_check,
             },
             "memory": {
                 "enabled": config.memory_enabled,

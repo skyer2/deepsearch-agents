@@ -30,6 +30,10 @@ class RunObservabilitySnapshot:
     compression_steps: int = 0
     step_message_tokens_peak: int = 0
     context_budget_trims: int = 0
+    entity_retention_avg: float = 1.0
+    retention_patches: int = 0
+    fresh_threads: int = 0
+    tool_results_cleared: int = 0
     memory_recalled_count: int = 0
     memory_saved_count: int = 0
 
@@ -68,6 +72,17 @@ def build_observability_snapshot(state: "LoopState") -> RunObservabilitySnapshot
         compression_steps=len(state.compression_ratios),
         step_message_tokens_peak=state.obs_step_message_tokens_peak,
         context_budget_trims=state.obs_context_budget_trims,
+        entity_retention_avg=round(
+            (
+                sum(state.obs_entity_retention_rates) / len(state.obs_entity_retention_rates)
+            )
+            if state.obs_entity_retention_rates
+            else 1.0,
+            3,
+        ),
+        retention_patches=state.obs_retention_patches,
+        fresh_threads=state.obs_fresh_threads,
+        tool_results_cleared=getattr(state, "obs_tool_results_cleared", 0),
         memory_recalled_count=state.obs_memory_recalled_count,
         memory_saved_count=state.obs_memory_saved_count,
     )

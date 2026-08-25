@@ -206,6 +206,15 @@ class LoopState:
     obs_estimated_tokens_saved: int = 0
     obs_step_message_tokens_peak: int = 0
     obs_context_budget_trims: int = 0
+    working_notes: str = ""
+    evidence_lookup_block: str = ""
+    evidence_lookup: list[Any] = field(default_factory=list)
+    obs_entity_retention_rates: list[float] = field(default_factory=list)
+    obs_retention_patches: int = 0
+    obs_fresh_threads: int = 0
+    obs_tool_results_cleared: int = 0
+    graph_thread_ids: list[str] = field(default_factory=list)
+    numeric_citation_coverage: float = 0.0
     obs_memory_recalled_count: int = 0
     obs_memory_saved_count: int = 0
     obs_memory_recall_at_k: float = 0.0

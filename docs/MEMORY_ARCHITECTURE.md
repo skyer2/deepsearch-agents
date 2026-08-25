@@ -1,6 +1,9 @@
 # 深度研搜记忆层架构（Phase 18）
 
-> 本文回答三件事：业界怎么做、本仓改前缺什么、改完后怎么讲。
+> **系统全貌（先框架后细节）：** [MEMORY_SYSTEM.md](./MEMORY_SYSTEM.md)  
+> **面试讲法 + 问题清单：** [MEMORY_INTERVIEW.md](./MEMORY_INTERVIEW.md)
+>
+> 本文只保留：业界对照、Phase 18 补了什么、30 秒口播。
 
 ## 1. 总判断
 

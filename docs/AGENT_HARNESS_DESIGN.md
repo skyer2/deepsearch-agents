@@ -355,6 +355,11 @@ class RecoveryManager:
 
 ## 6. 上下文工程与压缩（Context Engineering）
 
+> **现行实现全貌（先框架后细节）：** [CONTEXT_SYSTEM.md](./CONTEXT_SYSTEM.md)  
+> **面试讲法 + 问题清单：** [CONTEXT_INTERVIEW.md](./CONTEXT_INTERVIEW.md)
+>
+> 下面 6.1–6.3 是升级设计时的草案。其中「返回 `list[Message]`」「DeepAgents SummarizationMiddleware 85% 自动摘要」**不是**当前 Harness 主路径。以 CONTEXT_SYSTEM.md 和 `context_builder.py` / `compressor.py` 为准。
+
 ### 6.1 四层 Context Builder
 
 ```python

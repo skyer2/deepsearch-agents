@@ -54,8 +54,8 @@ Layer 1  工具层     MCP Registry + Tavily MCP Server(stdio) + MySQL + RAGFlow
 | 显式 Loop | per-step execute/compress/validate/recover | `app/agent/harness/loop.py` |
 | 结果校验 | step + finalize 双层校验 | `app/agent/harness/validator.py` |
 | 失败恢复 | 结构化 hint + 重试上限 | `app/agent/harness/recovery.py` |
-| 上下文压缩 | LLM 摘要 + 截断降级 | `app/agent/harness/compressor.py` |
-| 跨会话记忆 | 分层 Memory：身份四元组 + 信任分级 + 来源台账 + SUPERSEDE | `app/agent/memory/` `docs/MEMORY_ARCHITECTURE.md` |
+| 上下文工程与压缩 | 分层 user message + 步级压缩 + 窗口卫生 + 证据回读 | `app/agent/harness/` [全貌](docs/CONTEXT_SYSTEM.md) [改进对照](docs/CONTEXT_IMPROVEMENTS.md) [面试](docs/CONTEXT_INTERVIEW.md) |
+| 跨会话记忆 | 分层 Memory：身份四元组 + 信任分级 + 来源台账 + SUPERSEDE | `app/agent/memory/` [全貌](docs/MEMORY_SYSTEM.md) [面试](docs/MEMORY_INTERVIEW.md) [业界对照](docs/MEMORY_ARCHITECTURE.md) |
 | MCP 工具发现 | Registry + **真 stdio MCP Server（Tavily）** | `app/mcp/` |
 | 可观测性 | WebSocket + Langfuse + JSONL 日志 | `app/api/monitor.py` `tracing.py` `trace_logger.py` |
 | 评测回归 | 10 条 golden task + 8 项指标 + baseline | `tests/eval/` + CI |

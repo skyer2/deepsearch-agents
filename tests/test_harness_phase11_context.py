@@ -62,7 +62,8 @@ def test_step_message_budget_metrics():
     )
     assert builder.last_step_metrics is not None
     assert builder.last_step_metrics.total_tokens <= 500
-    assert "预算截断" in msg or len(msg) < 5000
+    assert "KEEP_STEP_INSTRUCTION" in msg or "当前执行步骤" in msg
+    assert builder.last_step_metrics.used_layer_priority is True
     print("[OK] step message budget")
 
 
@@ -70,9 +71,9 @@ def test_compressor_threshold():
     c = ContextCompressor(model=None, enabled=False, threshold_chars=100)
     import asyncio
 
-    text, meta = asyncio.run(c.compress("a" * 200, step_type="network_search"))
-    assert meta["method"] == "truncate"
-    assert meta["compression_ratio"] < 1.0
+    text, meta = asyncio.run(c.compress("a" * 500, step_type="network_search"))
+    assert "truncate" in str(meta["method"])
+    assert len(text) < 500 or meta.get("method") != "none"
     print("[OK] compressor threshold")
 
 

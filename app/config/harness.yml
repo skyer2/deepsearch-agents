@@ -7,14 +7,22 @@ harness:
     max_tokens: 500
     threshold_chars: 2000        # 【Phase 11】超过此字符数触发压缩
     model: "qwen-turbo"
+    retention_check: true        # 【Phase 19】压缩后检查 URL/数字是否还在
+    retention_min_url: 0.8
+    retention_min_number: 0.5
 
-  # 【Phase 11】上下文工程 — 分层预算 + prior 回灌 + 外部内容隔离
+  # 【Phase 11/19】上下文工程 — 分层预算 + 窗口卫生 + 证据回读
   context:
     max_step_message_tokens: 12000   # 单步 user message token 上限（估算）
     prior_results_max_steps: 5       # 回灌最近 N 步摘要
     prior_snippet_max_chars: 400
     wrap_untrusted_external: true    # 检索结果用 <untrusted> 包裹
     layer_budget_log_enabled: true   # 记录各层 token 估算
+    fresh_thread_per_step: true      # 【Phase 19】每步独立 LangGraph thread，避免旧 tool 原文叠窗口
+    layer_priority_eviction: true    # 【Phase 19】超预算按层淘汰，当前步骤指令优先保留
+    working_notes_enabled: true      # 【Phase 19】抗压缩工作笔记
+    evidence_lookup_enabled: true    # 【Phase 19】写报告可回读 evidence 摘录
+    clear_bulky_tool_results: true   # 【Phase 19】HITL resume 前清除过长 tool_result
 
   memory:
     provider: "sqlite"         # sqlite | local | mem0

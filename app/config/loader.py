@@ -39,6 +39,14 @@ class HarnessConfig:
     context_prior_snippet_max_chars: int = 400
     context_wrap_untrusted_external: bool = True
     context_layer_budget_log_enabled: bool = True
+    context_fresh_thread_per_step: bool = True
+    context_layer_priority_eviction: bool = True
+    context_working_notes_enabled: bool = True
+    context_evidence_lookup_enabled: bool = True
+    context_clear_bulky_tool_results: bool = True
+    compression_retention_check: bool = True
+    compression_retention_min_url: float = 0.8
+    compression_retention_min_number: float = 0.5
 
     memory_provider: str = "sqlite"
     memory_enabled: bool = True
@@ -214,6 +222,36 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
         context_layer_budget_log_enabled=_env_bool(
             "HARNESS_CONTEXT_LAYER_BUDGET_LOG",
             bool(context_cfg.get("layer_budget_log_enabled", True)),
+        ),
+        context_fresh_thread_per_step=_env_bool(
+            "HARNESS_CONTEXT_FRESH_THREAD",
+            bool(context_cfg.get("fresh_thread_per_step", True)),
+        ),
+        context_layer_priority_eviction=_env_bool(
+            "HARNESS_CONTEXT_LAYER_PRIORITY",
+            bool(context_cfg.get("layer_priority_eviction", True)),
+        ),
+        context_working_notes_enabled=_env_bool(
+            "HARNESS_CONTEXT_WORKING_NOTES",
+            bool(context_cfg.get("working_notes_enabled", True)),
+        ),
+        context_evidence_lookup_enabled=_env_bool(
+            "HARNESS_CONTEXT_EVIDENCE_LOOKUP",
+            bool(context_cfg.get("evidence_lookup_enabled", True)),
+        ),
+        context_clear_bulky_tool_results=_env_bool(
+            "HARNESS_CONTEXT_CLEAR_TOOL_RESULTS",
+            bool(context_cfg.get("clear_bulky_tool_results", True)),
+        ),
+        compression_retention_check=_env_bool(
+            "HARNESS_COMPRESSION_RETENTION",
+            bool(compression.get("retention_check", True)),
+        ),
+        compression_retention_min_url=float(
+            compression.get("retention_min_url", 0.8)
+        ),
+        compression_retention_min_number=float(
+            compression.get("retention_min_number", 0.5)
         ),
         memory_provider=str(
             os.getenv(

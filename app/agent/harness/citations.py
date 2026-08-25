@@ -16,6 +16,7 @@ from typing import Any
 URL_PATTERN = re.compile(r"https?://[^\s\]\)\"'<>]+", re.IGNORECASE)
 CITATION_MARKER_PATTERN = re.compile(r"\[(\d+)\]")
 SENTENCE_SPLIT_PATTERN = re.compile(r"(?<=[。！？.!?])\s+")
+CITATION_ONLY_PATTERN = re.compile(r"^(?:\[\d+\])+\s*$")
 
 
 @dataclass
@@ -29,6 +30,7 @@ class EvidenceSource:
     locator: str
     excerpt: str
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+    bound_fact: str = ""
 
 
 @dataclass
@@ -45,6 +47,7 @@ class CitationManager:
     def __init__(self) -> None:
         self.sources: list[EvidenceSource] = []
         self._counter = 0
+        self.fact_bindings: list[dict[str, Any]] = []
 
     def _next_id(self) -> str:
         self._counter += 1
@@ -71,7 +74,7 @@ class CitationManager:
                 step_type=step_type,
                 source_kind="url",
                 locator=url.rstrip(".,;"),
-                excerpt=content[:240].replace("\n", " "),
+                excerpt=content[:800].replace("\n", " "),
             )
             self.sources.append(src)
             registered.append(src)
@@ -84,7 +87,7 @@ class CitationManager:
                 step_type=step_type,
                 source_kind="sql",
                 locator=sql_hint or "mysql://structured_query",
-                excerpt=content[:300].replace("\n", " "),
+                excerpt=content[:800].replace("\n", " "),
             )
             self.sources.append(src)
             registered.append(src)
@@ -96,7 +99,7 @@ class CitationManager:
                 step_type=step_type,
                 source_kind="file",
                 locator=meta.get("filename", "uploaded_file"),
-                excerpt=content[:300].replace("\n", " "),
+                excerpt=content[:800].replace("\n", " "),
             )
             self.sources.append(src)
             registered.append(src)
@@ -108,7 +111,7 @@ class CitationManager:
                 step_type=step_type,
                 source_kind="kb",
                 locator="ragflow://internal_kb",
-                excerpt=content[:300].replace("\n", " "),
+                excerpt=content[:800].replace("\n", " "),
             )
             self.sources.append(src)
             registered.append(src)
@@ -120,12 +123,76 @@ class CitationManager:
                 step_type=step_type,
                 source_kind="text",
                 locator=f"step:{step_index}:{step_type}",
-                excerpt=content[:300].replace("\n", " "),
+                excerpt=content[:800].replace("\n", " "),
             )
             self.sources.append(src)
             registered.append(src)
 
         return registered
+
+    def bind_worker_facts(
+        self,
+        step_index: int,
+        step_type: str,
+        facts: list[str],
+        sources: list[str],
+    ) -> list[EvidenceSource]:
+        """把工人 JSON 的 fact 与 source 绑成可回读证据，避免只靠段落序号贴 [n]。"""
+        registered: list[EvidenceSource] = []
+        locators = [str(s).strip() for s in (sources or []) if str(s).strip()][:10]
+        kind = "url" if step_type == "network_search" else (
+            "sql" if step_type == "database_query" else (
+                "kb" if step_type == "knowledge_base" else (
+                    "file" if step_type == "file_read" else "text"
+                )
+            )
+        )
+        for i, fact in enumerate((facts or [])[:10]):
+            text = str(fact).strip()
+            if not text:
+                continue
+            locator = locators[i] if i < len(locators) else (
+                locators[0] if locators else f"step:{step_index}:{step_type}"
+            )
+            src = EvidenceSource(
+                source_id=self._next_id(),
+                step_index=step_index,
+                step_type=step_type,
+                source_kind=kind,
+                locator=locator,
+                excerpt=text[:800],
+                bound_fact=text,
+            )
+            self.sources.append(src)
+            self.fact_bindings.append(
+                {
+                    "fact": text,
+                    "source_id": src.source_id,
+                    "locator": locator,
+                    "step_index": step_index,
+                }
+            )
+            registered.append(src)
+        return registered
+
+    def build_lookup_block(self, *, max_items: int = 12, excerpt_chars: int = 480) -> str:
+        """写报告步可回读的证据目录（digest 之外的原文摘录）。"""
+        if not self.sources:
+            return ""
+        id_to_num = self.source_number_map()
+        lines = [
+            "    【可回读证据 — 按 [n] 核对，勿使用未列出的精确数字】",
+            "    需要更长摘录时请读取工作目录 evidence.json / working_notes.md。",
+        ]
+        for src in self.sources[:max_items]:
+            num = id_to_num[src.source_id]
+            excerpt = (src.bound_fact or src.excerpt or "")[:excerpt_chars]
+            lines.append(
+                f"  [{num}] {src.source_id} ({src.source_kind}) {src.locator}"
+            )
+            if excerpt:
+                lines.append(f"      {excerpt}")
+        return "\n".join(lines)
 
     def _extract_sql_hint(self, content: str) -> str:
         for line in content.splitlines():
@@ -160,42 +227,56 @@ class CitationManager:
         return "\n".join(lines)
 
     def inject_inline_citation_hints(self, content: str) -> str:
-        """在正文段落末追加可用引用编号提示（轻量 Citation-First）。"""
+        """只在段落命中已绑定 fact 时补 [n]，不再按段落序号盲贴。"""
         if not self.sources or not content.strip():
             return content
 
         id_to_num = self.source_number_map()
-        step_nums: dict[int, list[int]] = {}
-        for src in self.sources:
-            step_nums.setdefault(src.step_index, []).append(id_to_num[src.source_id])
-
         header = (
-            "> **Evidence-First 报告**：正文关键结论应标注 [n] 引用；"
-            "完整来源见文末参考文献。\n\n"
+            "> **Evidence-First 报告**：正文含数字的结论应标注已登记的 [n]；"
+            "完整来源见文末参考文献。未核实断言不要编造引用。\n\n"
         )
         if content.startswith("> **Evidence-First"):
             header = ""
 
+        bindings = self.fact_bindings or [
+            {"fact": src.bound_fact or src.excerpt, "source_id": src.source_id}
+            for src in self.sources
+            if (src.bound_fact or src.excerpt)
+        ]
+
         paragraphs = [p for p in content.split("\n\n") if p.strip()]
-        if len(paragraphs) <= 1:
-            nums = sorted({id_to_num[s.source_id] for s in self.sources})
-            hint = "".join(f"[{n}]" for n in nums[:3])
-            if hint and hint not in content:
-                return header + content.rstrip() + f" {hint}\n"
+        if not paragraphs:
             return header + content
 
         enriched: list[str] = []
-        for idx, para in enumerate(paragraphs):
+        for para in paragraphs:
             if para.startswith("##") or para.startswith("> **Evidence"):
                 enriched.append(para)
                 continue
             if CITATION_MARKER_PATTERN.search(para):
                 enriched.append(para)
                 continue
-            step_idx = min(idx, len(self.sources) - 1)
-            src = self.sources[step_idx]
-            num = id_to_num[src.source_id]
-            enriched.append(para.rstrip() + f" [{num}]")
+            matched_nums: list[int] = []
+            para_lower = para.lower()
+            for bind in bindings:
+                fact = str(bind.get("fact") or "").strip()
+                if len(fact) < 8:
+                    continue
+                needle = fact[:40].lower()
+                if needle and needle in para_lower:
+                    num = id_to_num.get(str(bind.get("source_id")))
+                    if num and num not in matched_nums:
+                        matched_nums.append(num)
+            if matched_nums:
+                hint = "".join(f"[{n}]" for n in matched_nums[:3])
+                stripped = para.rstrip()
+                if stripped[-1:] in "。！？.!?":
+                    enriched.append(stripped[:-1] + f" {hint}{stripped[-1]}")
+                else:
+                    enriched.append(stripped + f" {hint}")
+            else:
+                enriched.append(para)
         return header + "\n\n".join(enriched)
 
     def build_cited_report(self, raw_content: str) -> str:
@@ -207,10 +288,11 @@ class CitationManager:
         return body
 
     def compute_metrics(self, final_content: str) -> dict[str, float]:
-        """计算 Citation Coverage Rate 与 Hallucination Rate（启发式）。"""
+        """CCR：优先统计「含数字的句子」中带 [n] 的比例，避免把标题句算进幻觉。"""
         if not self.sources:
             return {
                 "citation_coverage_rate": 0.0,
+                "numeric_citation_coverage": 0.0,
                 "hallucination_rate": 1.0,
                 "cited_markers": 0,
                 "registered_sources": 0,
@@ -218,27 +300,36 @@ class CitationManager:
 
         cited_nums = set(int(m) for m in CITATION_MARKER_PATTERN.findall(final_content))
         registered = len(self.sources)
-        coverage = min(1.0, len(cited_nums) / registered) if registered else 0.0
+        source_mention = min(1.0, len(cited_nums) / registered) if registered else 0.0
 
         sentences = [
-            s.strip()
-            for s in SENTENCE_SPLIT_PATTERN.split(final_content)
-            if len(s.strip()) >= 12
-            and not s.strip().startswith("#")
-            and not s.strip().startswith(">")
+            s
+            for s in _split_report_sentences(final_content)
+            if len(s) >= 12
+            and not s.startswith("#")
+            and not s.startswith(">")
             and "参考文献" not in s
+            and "Evidence-First" not in s
         ]
-        uncited = 0
-        for sentence in sentences:
-            if not CITATION_MARKER_PATTERN.search(sentence):
-                uncited += 1
-        hallucination = uncited / len(sentences) if sentences else (1.0 - coverage)
+        numeric_sentences = [
+            s for s in sentences if re.search(r"\d", s) and "http" not in s.lower()[:12]
+        ]
+        pool = numeric_sentences or sentences
+        uncited = sum(1 for s in pool if not CITATION_MARKER_PATTERN.search(s))
+        numeric_coverage = (
+            (len(pool) - uncited) / len(pool) if pool else source_mention
+        )
+        hallucination = uncited / len(pool) if pool else (1.0 - source_mention)
+        coverage = numeric_coverage if numeric_sentences else source_mention
 
         return {
             "citation_coverage_rate": round(coverage, 3),
+            "numeric_citation_coverage": round(numeric_coverage, 3),
+            "source_mention_rate": round(source_mention, 3),
             "hallucination_rate": round(min(1.0, hallucination), 3),
             "cited_markers": len(cited_nums),
             "registered_sources": registered,
+            "numeric_sentence_count": len(numeric_sentences),
         }
 
     def validate_citations(self, final_content: str, min_coverage: float = 0.2) -> tuple[bool, str]:
@@ -264,3 +355,20 @@ class CitationManager:
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return path
+
+
+def _split_report_sentences(text: str) -> list[str]:
+    """切句后把紧跟的 [n] 并回上一句，避免「数字句 / 引用标记」被拆开导致 CCR=0。"""
+    parts = [p.strip() for p in SENTENCE_SPLIT_PATTERN.split(text or "") if p.strip()]
+    merged: list[str] = []
+    leading_cite = re.compile(r"^((?:\[\d+\])+)\s*(.*)$", re.DOTALL)
+    for part in parts:
+        match = leading_cite.match(part)
+        if merged and match:
+            merged[-1] = f"{merged[-1].rstrip()} {match.group(1)}"
+            rest = (match.group(2) or "").strip()
+            if rest:
+                merged.append(rest)
+        else:
+            merged.append(part)
+    return merged
