@@ -47,7 +47,7 @@ def test_text_only_explicit():
 
 
 def test_ambiguity_flags_and_clarification():
-    query = "列出 AI 趋势并附来源"
+    query = "简要回答 AI 趋势并附来源"
     intent = understand_task(query)
     assert intent.needs_clarification
     assert intent.clarification_question

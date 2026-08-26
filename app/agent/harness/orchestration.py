@@ -22,18 +22,19 @@ from app.agent.harness.state import ExecutionPlan, PlanStep, StepResult, StepSta
 
 # 可并行 fan-out 的检索类步骤（写文件 / 汇总不在此列）
 RETRIEVAL_STEP_TYPES = frozenset(
-    {"network_search", "database_query", "knowledge_base", "file_read"}
+    {"network_search", "database_query", "knowledge_base", "file_read", "research"}
 )
 
 # 子 Agent 步骤必须走 task，禁止主 Agent 直接调文件工具
 SUBAGENT_STEP_TYPES = frozenset(
-    {"network_search", "database_query", "knowledge_base"}
+    {"network_search", "database_query", "knowledge_base", "research"}
 )
 
 FORBIDDEN_TOOLS_BY_STEP: dict[str, frozenset[str]] = {
     "network_search": frozenset({"generate_markdown", "convert_md_to_pdf"}),
     "database_query": frozenset({"generate_markdown", "convert_md_to_pdf", "internet_search"}),
     "knowledge_base": frozenset({"generate_markdown", "convert_md_to_pdf"}),
+    "research": frozenset({"generate_markdown", "convert_md_to_pdf"}),
     "generate_markdown": frozenset({"internet_search", "execute_sql_query", "list_sql_tables"}),
 }
 
@@ -300,6 +301,10 @@ def check_unauthorized_tools(
     """校验本步是否调用了禁止工具（计划绑定）。"""
     if not enforce:
         return True, []
+    if step.allowed_tools:
+        allowed = set(step.allowed_tools)
+        bad = [t for t in tools_invoked if t not in allowed]
+        return len(bad) == 0, bad
     forbidden = FORBIDDEN_TOOLS_BY_STEP.get(step.step_type, frozenset())
     bad = [t for t in tools_invoked if t in forbidden]
     return len(bad) == 0, bad

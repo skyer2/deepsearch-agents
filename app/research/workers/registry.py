@@ -16,6 +16,7 @@ STEP_KINDS: dict[str, str] = {
     "database_query": "create_agent",
     "knowledge_base": "create_agent",
     "file_read": "create_agent",
+    "research": "create_agent",
     "generate_markdown": "create_agent",
     "convert_pdf": "create_agent",
     "summarize": "create_agent",
@@ -58,6 +59,15 @@ def worker_tools_for_step(step_type: str) -> list[str]:
         "database_query": ["list_sql_tables", "get_table_data", "execute_sql_query"],
         "knowledge_base": ["get_assistant_list", "create_ask_delete"],
         "file_read": ["read_file_content"],
+        "research": [
+            "internet_search",
+            "list_sql_tables",
+            "get_table_data",
+            "execute_sql_query",
+            "get_assistant_list",
+            "create_ask_delete",
+            "read_file_content",
+        ],
         "generate_markdown": ["generate_markdown", "read_file_content"],
         "convert_pdf": ["convert_md_to_pdf", "generate_markdown", "read_file_content"],
         "summarize": ["generate_markdown", "read_file_content"],
@@ -103,7 +113,7 @@ def build_worker_registry(
     from app.agent.subagents.network_search_agent import build_network_search_agent
     from app.mcp.client import get_db_tools, get_internet_search_tool, get_ragflow_tools
     from app.research.workers.factory import create_research_worker, create_synthesis_worker
-    from app.research.workers.prompts import SYNTHESIS_SYSTEM_PROMPT
+    from app.research.workers.prompts import RESEARCH_TASK_SYSTEM_PROMPT, SYNTHESIS_SYSTEM_PROMPT
 
     kind_map = dict(STEP_KINDS)
     if kinds:
@@ -162,6 +172,14 @@ def build_worker_registry(
     registry.register(
         "knowledge_base",
         _maybe_deep("knowledge_base", kb_tools, str(kb.get("system_prompt") or "")),
+    )
+    research_tools: list[Any] = []
+    for tool in [*net_tools, *db_tools, *kb_tools]:
+        if tool is not None and tool not in research_tools:
+            research_tools.append(tool)
+    registry.register(
+        "research",
+        _maybe_deep("research", research_tools, RESEARCH_TASK_SYSTEM_PROMPT),
     )
 
     read_tool = files.get("read_file_content")

@@ -22,3 +22,11 @@ SYNTHESIS_PROMPT_ADDENDUM = """
 禁止再做公开检索或数据库查询；写报告必须使用【可回读证据】与【工作笔记】。
 引用使用已登记的 [n]，禁止编造未出现的精确数字。
 """
+
+RESEARCH_TASK_SYSTEM_PROMPT = """
+你是研搜工人，只负责当前研究目标，不是调度者。
+- 按本步 objective 收集证据，不要写最终报告，不要拆新任务。
+- 只使用本步允许的工具；禁止调用未列出的工具。
+- 禁止联网若允许工具里没有 internet_search。
+- 完成后只输出结构化 JSON（summary/facts/sources），不要生成 todo-list。
+"""

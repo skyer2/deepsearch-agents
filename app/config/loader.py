@@ -155,6 +155,10 @@ class HarnessConfig:
     planner_clarification_enabled: bool = True
     planner_clarification_auto_resolve: bool = True
     planner_plan_review_min_confidence: float = 0.75
+    planner_hybrid_enabled: bool = True
+    planner_dynamic_lead_enabled: bool = True
+    planner_max_research_tasks: int = 6
+    planner_max_plan_patch_tasks: int = 2
 
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
@@ -571,6 +575,16 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
         planner_plan_review_min_confidence=float(
             planner_cfg.get("plan_review_min_confidence", 0.75)
         ),
+        planner_hybrid_enabled=_env_bool(
+            "HARNESS_PLANNER_HYBRID",
+            bool(planner_cfg.get("hybrid_enabled", True)),
+        ),
+        planner_dynamic_lead_enabled=_env_bool(
+            "HARNESS_PLANNER_DYNAMIC_LEAD",
+            bool(planner_cfg.get("dynamic_lead_planner", True)),
+        ),
+        planner_max_research_tasks=int(planner_cfg.get("max_research_tasks", 6)),
+        planner_max_plan_patch_tasks=int(planner_cfg.get("max_plan_patch_tasks", 2)),
         raw=raw,
     )
     return config
@@ -587,3 +601,6 @@ def reload_harness_config() -> HarnessConfig:
     global _cached_config
     _cached_config = load_harness_config()
     return _cached_config
+
+
+reset_harness_config = reload_harness_config

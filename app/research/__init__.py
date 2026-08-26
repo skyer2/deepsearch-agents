@@ -29,4 +29,5 @@ SEMANTIC_DECISIONS = (
     "query_refinement",
     "local_tool_use",
     "evidence_gap_judgment",
+    "dynamic_objective_decomposition",
 )

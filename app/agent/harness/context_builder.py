@@ -29,7 +29,7 @@ from app.agent.memory.models import MemoryRecord
 from app.mcp.registry import mcp_registry
 
 RETRIEVAL_STEP_TYPES = frozenset(
-    {"network_search", "database_query", "knowledge_base", "file_read"}
+    {"network_search", "database_query", "knowledge_base", "file_read", "research"}
 )
 
 
@@ -323,7 +323,8 @@ class ContextBuilder:
     【当前执行步骤 {step_index + 1}/{total_steps}】
     类型: {step.step_type}
     状态: {step.metadata.get('status', StepStatus.PENDING.value)}
-    目标: {step.description}
+    目标: {step.objective or step.description}
+    允许工具: {", ".join(step.allowed_tools) if step.allowed_tools else "本步绑定工具"}
     要求: 只完成当前步骤，{agent_hint}{parallel_note}
     """
 

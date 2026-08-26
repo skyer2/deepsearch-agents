@@ -491,26 +491,77 @@ class ResearchGraphRunner:
 
     async def node_replan(self, gstate: dict[str, Any]) -> dict[str, Any]:
         from app.agent.harness.guardrails import can_replan
+        from app.research.planning.plan_patch import apply_plan_patch, build_gap_patch
+        from app.research.planning.policy import parse_source_policy
 
         session = _require_session(gstate)
         state = session.state
-        if state.plan is None:
+        if state.plan is None or state.intent is None:
             return {"progress": "run"}
-        failed_index = None
-        for index, step in enumerate(state.plan.steps):
-            if str(step.metadata.get("status") or "") == StepStatus.FAILED.value:
-                failed_index = index
-        if failed_index is None or not can_replan(state, self.harness.harness_config):
-            return {"progress": "run"}
-        state.plan = dynamic_replan(state.plan, failed_index, "step_failed")
-        state.plan = annotate_plan_tasks(state.plan)
+        if not can_replan(state, self.harness.harness_config):
+            return {"progress": "enough"}
+        policy = parse_source_policy(state.intent.raw_query)
+        if (state.plan.planning_mode or "") == "dynamic":
+            patch = build_gap_patch(
+                state.plan,
+                state.intent,
+                worker_results=list(gstate.get("worker_results") or []),
+            )
+            plan, issues = apply_plan_patch(
+                state.plan,
+                patch,
+                state.intent,
+                policy=policy,
+                max_new_tasks=int(
+                    getattr(self.harness.harness_config, "planner_max_plan_patch_tasks", 2) or 2
+                ),
+                max_plan_steps=self.harness.harness_config.max_plan_steps,
+            )
+            if issues:
+                return {"progress": "enough"}
+            state.plan = plan
+        else:
+            failed_index = None
+            for index, step in enumerate(state.plan.steps):
+                if str(step.metadata.get("status") or "") == StepStatus.FAILED.value:
+                    failed_index = index
+            if failed_index is None:
+                return {"progress": "enough"}
+            extra = None
+            if "web" in policy.forbidden_sources:
+                patch = build_gap_patch(
+                    state.plan,
+                    state.intent,
+                    worker_results=list(gstate.get("worker_results") or []),
+                )
+                plan, issues = apply_plan_patch(
+                    state.plan,
+                    patch,
+                    state.intent,
+                    policy=policy,
+                    max_new_tasks=int(
+                        getattr(self.harness.harness_config, "planner_max_plan_patch_tasks", 2)
+                        or 2
+                    ),
+                    max_plan_steps=self.harness.harness_config.max_plan_steps,
+                )
+                if issues:
+                    return {"progress": "enough"}
+                state.plan = plan
+            else:
+                state.plan = dynamic_replan(
+                    state.plan,
+                    failed_index,
+                    "step_failed",
+                    extra_steps=extra,
+                )
+                state.plan = annotate_plan_tasks(state.plan)
         state.replan_count += 1
         self.harness._report_phase(
             Phase.REPLAN,
             "done",
             state=state,
-            step_index=failed_index,
-            reason="step_failed",
+            reason="gap" if (state.plan.planning_mode or "") == "dynamic" else "step_failed",
             new_steps=len(state.plan.steps),
         )
         return {

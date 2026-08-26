@@ -24,7 +24,9 @@ Leaf Agent / Tool / MCP          create_agent()；必要时才用精简 DeepAgen
 |------|--------|
 | 并发上限、budget、timeout、retry、依赖、权限、HITL 是否等待 | **Code** |
 | checkpoint / resume | **LangGraph Runtime** |
-| 问题拆成哪些研究方向、query 怎么迭代 | **LLM Planner / Worker** |
+| 不要联网 / DB 权限 / 工具白名单 | **Source policy（代码）** |
+| 应研究哪些实体与维度 | **Lead Planner LLM（仅 DYNAMIC）** |
+| 某个任务搜什么 query | **Worker Agent** |
 | PlanPatch 是否接受 | **Code validation** |
 | 何时强制停止 | **Code** |
 
@@ -44,7 +46,8 @@ LangGraph 是成熟的 durable workflow runtime 之一，不是行业协议。�
 - Plan 带 `task_id` / `depends_on` / `plan_version`
 - 幂等键：`run_id + plan_version + task_id + action_id`（兼容旧 `step_index` 键）
 - **生产入口** `run_deep_agent` → `AgentHarness.run` → `research_graph.ainvoke`（`graph_runtime_enabled: true`）
-- 并行检索走图内 `Send`，不再走生产路径上的 `asyncio.gather`
+- 并行研究任务走图内 `Send`（`research` + 旧数据源步）
+- **Hybrid planning**：DIRECT / TEMPLATE / DYNAMIC。Lead Planner 只输出 objective DAG，不掌握 runtime；来源禁令由 policy 强制
 
 刻意保留：
 
@@ -56,10 +59,9 @@ LangGraph 是成熟的 durable workflow runtime 之一，不是行业协议。�
 
 下一步：
 
-1. 并行单元从数据源工人升级为 research task（Phase 4）
-2. 把 LoopState 热恢复完全交给 durable LangGraph checkpointer，再删除 `StepCheckpointStore`
-3. 合成后独立 claim / citation verifier 节点
-4. 删除 `check_subagent_binding` 兼容 metrics 与 Main Agent fallback 残留
+1. 把 LoopState 热恢复完全交给 durable LangGraph checkpointer，再删除 `StepCheckpointStore`
+2. 合成后独立 claim / citation verifier 节点
+3. 删除 `check_subagent_binding` 兼容 metrics 与 Main Agent fallback 残留
 
 ## 几个 Agent？
 

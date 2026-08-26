@@ -14,10 +14,7 @@ from typing import Any, Optional
 from app.agent.harness.intent_slots import IntentSlots, build_clarification_question, detect_ambiguity_flags
 from app.agent.harness.planner import (
     auto_resolve_clarification,
-    build_plan,
-    finalize_plan,
     understand_task as understand_task_rules,
-    validate_plan_against_intent,
 )
 from app.agent.harness.state import ExecutionPlan, TaskIntent
 
@@ -141,7 +138,9 @@ def merge_intent_from_llm(
     merged.summary = (
         f"研搜任务，交付物={merged.deliverable}，置信度={merged.intent_confidence}（rules+llm）"
     )
-    return merged
+    from app.research.planning.policy import apply_source_policy
+
+    return apply_source_policy(merged)
 
 
 async def understand_with_llm(
@@ -224,10 +223,10 @@ async def understand_intent(
 
 
 def build_plan_for_intent(intent: TaskIntent) -> tuple[ExecutionPlan, list[str]]:
-    """【Phase 14】Plan 阶段：模板计划 + 一致性校验 issues。"""
-    plan = finalize_plan(build_plan(intent))
-    _ok, issues = validate_plan_against_intent(intent, plan)
-    return plan, issues
+    """Plan 阶段：Hybrid policy + 模板/动态 DAG + 校验。"""
+    from app.research.planning.compose import compose_execution_plan_sync
+
+    return compose_execution_plan_sync(intent)
 
 
 async def plan_task(

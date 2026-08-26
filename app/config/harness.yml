@@ -148,3 +148,7 @@ harness:
     clarification_enabled: true            # 低置信/歧义 → HITL 澄清
     clarification_auto_resolve: true       # 无 HITL 响应/单测时自动保守解析
     plan_review_min_confidence: 0.75       # 低于此阈值触发计划审批
+    hybrid_enabled: true                   # DIRECT / TEMPLATE / DYNAMIC 分流
+    dynamic_lead_planner: true             # DYNAMIC 时用受约束 Lead Planner（失败回退启发式）
+    max_research_tasks: 6                  # 研究任务上限（不含合成步）
+    max_plan_patch_tasks: 2                # 单次 PlanPatch 最多新增任务

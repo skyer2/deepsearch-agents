@@ -60,6 +60,9 @@ class TaskIntent:
     needs_clarification: bool = False
     clarification_question: str = ""
     clarification_resolved: bool = False
+    forbidden_sources: list[str] = field(default_factory=list)
+    required_sources: list[str] = field(default_factory=list)
+    planning_mode: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -80,6 +83,9 @@ class TaskIntent:
             "needs_clarification": self.needs_clarification,
             "clarification_question": self.clarification_question,
             "clarification_resolved": self.clarification_resolved,
+            "forbidden_sources": list(self.forbidden_sources),
+            "required_sources": list(self.required_sources),
+            "planning_mode": self.planning_mode,
         }
 
     @classmethod
@@ -105,6 +111,9 @@ class TaskIntent:
             needs_clarification=bool(data.get("needs_clarification", False)),
             clarification_question=str(data.get("clarification_question", "")),
             clarification_resolved=bool(data.get("clarification_resolved", False)),
+            forbidden_sources=[str(x) for x in (data.get("forbidden_sources") or [])],
+            required_sources=[str(x) for x in (data.get("required_sources") or [])],
+            planning_mode=str(data.get("planning_mode") or ""),
         )
 
 
@@ -118,6 +127,8 @@ class PlanStep:
     metadata: dict[str, Any] = field(default_factory=dict)  # 【Phase 6】HITL edit / replan 元数据
     task_id: str = ""
     depends_on: list[str] = field(default_factory=list)
+    allowed_tools: list[str] = field(default_factory=list)
+    objective: str = ""
 
     def resolved_task_id(self, index: int) -> str:
         return self.task_id or f"t{index}:{self.step_type}"
@@ -130,6 +141,8 @@ class PlanStep:
             "metadata": dict(self.metadata or {}),
             "task_id": self.task_id,
             "depends_on": list(self.depends_on or []),
+            "allowed_tools": list(self.allowed_tools or []),
+            "objective": self.objective,
         }
 
     @classmethod
@@ -142,6 +155,8 @@ class PlanStep:
             metadata=dict(row.get("metadata") or {}),
             task_id=str(row.get("task_id") or ""),
             depends_on=[str(x) for x in (row.get("depends_on") or [])],
+            allowed_tools=[str(x) for x in (row.get("allowed_tools") or [])],
+            objective=str(row.get("objective") or ""),
         )
 
 
@@ -152,12 +167,16 @@ class ExecutionPlan:
     steps: list[PlanStep] = field(default_factory=list)
     summary: str = ""
     plan_version: int = 1
+    planning_mode: str = "template"
+    research_brief: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "summary": self.summary,
             "steps": [step.to_dict() for step in self.steps],
             "plan_version": int(self.plan_version or 1),
+            "planning_mode": self.planning_mode or "template",
+            "research_brief": self.research_brief or "",
         }
 
     @classmethod
@@ -167,6 +186,8 @@ class ExecutionPlan:
             summary=str(row.get("summary", "")),
             steps=[PlanStep.from_dict(item) for item in (row.get("steps") or [])],
             plan_version=int(row.get("plan_version") or 1),
+            planning_mode=str(row.get("planning_mode") or "template"),
+            research_brief=str(row.get("research_brief") or ""),
         )
 
 

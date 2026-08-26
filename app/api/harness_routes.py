@@ -62,6 +62,8 @@ def harness_capabilities() -> dict[str, Any]:
             "clarification_hitl": config.planner_clarification_enabled,
             "plan_review": config.hitl_plan_review_enabled,
             "plan_validation": True,
+            "hybrid_enabled": getattr(config, "planner_hybrid_enabled", True),
+            "dynamic_lead_planner": getattr(config, "planner_dynamic_lead_enabled", True),
         },
         "safety": {
             "tools_fail_closed": config.tools_fail_closed,
@@ -73,6 +75,6 @@ def harness_capabilities() -> dict[str, Any]:
         "note": (
             "Domain Harness 定义计划、护栏、证据与评测；LangGraph StateGraph 是唯一 workflow authority。"
             "Leaf 为 create_agent，按 ResearchPlan 直调。HITL 图内 interrupt()，HTTP coordinator 只做前端桥。"
-            "Checkpointer 不管外部副作用，IdempotencyRegistry 仍然保留。"
+            "Lead 为 Supervisor Brain 而非 Supervisor Runtime。"
         ),
     }

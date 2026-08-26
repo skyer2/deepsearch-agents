@@ -15,7 +15,7 @@ from app.research.runtime.scheduler import (
     all_retrieval_done,
     annotate_plan_tasks,
     next_synthesis_step,
-    ready_retrieval_steps,
+    ready_research_steps,
 )
 from app.research.runtime.state import ResearchState, empty_research_state
 
@@ -97,7 +97,7 @@ def route_dispatch(state: ResearchState) -> list[Any] | str:
     if plan is None:
         return "finalize"
     status = dict(state.get("task_status") or {})
-    ready = ready_retrieval_steps(plan, status)
+    ready = ready_research_steps(plan, status)
     if ready:
         sends: list[Any] = []
         for index, step in ready:

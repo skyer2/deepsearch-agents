@@ -2,7 +2,7 @@
 DAG Scheduler：宏观控制代码化。
 
 READY = PENDING 且 depends_on 均 DONE。
-并行单元当前仍按数据源步（Phase 4 再升级为 research task）。
+并行单元：research task（含旧数据源步）。
 """
 
 from __future__ import annotations
@@ -29,7 +29,8 @@ def annotate_plan_tasks(plan: ExecutionPlan) -> ExecutionPlan:
                 markdown_id = step.task_id
             continue
         if step.step_type in RETRIEVAL_STEP_TYPES:
-            step.depends_on = []
+            if not step.depends_on:
+                step.depends_on = []
             retrieval_ids.append(step.task_id)
         elif step.step_type in {"generate_markdown", "summarize"}:
             step.depends_on = list(retrieval_ids)
@@ -81,11 +82,19 @@ def ready_steps(
     return ready
 
 
+def ready_research_steps(
+    plan: ExecutionPlan,
+    status: dict[str, str] | None = None,
+) -> list[tuple[int, PlanStep]]:
+    """可 fan-out 的研究任务：旧数据源步 + research objective 步。"""
+    return ready_steps(plan, status, include_types=RETRIEVAL_STEP_TYPES)
+
+
 def ready_retrieval_steps(
     plan: ExecutionPlan,
     status: dict[str, str] | None = None,
 ) -> list[tuple[int, PlanStep]]:
-    return ready_steps(plan, status, include_types=RETRIEVAL_STEP_TYPES)
+    return ready_research_steps(plan, status)
 
 
 def all_retrieval_done(plan: ExecutionPlan, status: dict[str, str] | None = None) -> bool:
@@ -111,7 +120,7 @@ def next_synthesis_step(
 def dispatch_sends(plan: ExecutionPlan, status: dict[str, str] | None = None) -> list[dict[str, Any]]:
     """纯数据描述的 fan-out 清单；graph.py 再转成 Send。"""
     payloads: list[dict[str, Any]] = []
-    for index, step in ready_retrieval_steps(plan, status):
+    for index, step in ready_research_steps(plan, status):
         payloads.append(
             {
                 "task_id": step.resolved_task_id(index),

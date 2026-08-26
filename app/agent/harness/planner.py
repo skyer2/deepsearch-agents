@@ -210,7 +210,7 @@ def understand_task(task_query: str, has_uploaded_files: bool = False) -> TaskIn
 
 
 
-    return TaskIntent(
+    intent = TaskIntent(
 
         raw_query=task_query,
 
@@ -243,6 +243,9 @@ def understand_task(task_query: str, has_uploaded_files: bool = False) -> TaskIn
         clarification_question=clarification_question,
 
     )
+    from app.research.planning.policy import apply_source_policy
+
+    return apply_source_policy(intent)
 
 
 

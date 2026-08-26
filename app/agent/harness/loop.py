@@ -622,7 +622,7 @@ class AgentHarness:
             2
             if (
                 self.harness_config.structured_output_retry
-                and step.step_type in {"network_search", "database_query", "knowledge_base"}
+                and step.step_type in {"network_search", "database_query", "knowledge_base", "research"}
             )
             else 1
         )
@@ -657,7 +657,7 @@ class AgentHarness:
             assert result is not None
             result = self._enrich_worker_result(step, result, state)
             structured_ok, struct_reason = self._check_structured_output(step, result)
-            if step.step_type in {"network_search", "database_query", "knowledge_base"}:
+            if step.step_type in {"network_search", "database_query", "knowledge_base", "research"}:
                 state.obs_structured_checks += 1
                 if structured_ok:
                     state.obs_structured_passes += 1
@@ -1372,7 +1372,19 @@ class AgentHarness:
 
         set_llm_phase(Phase.PLAN.value)
         if state.intent:
-            plan, issues = build_plan_for_intent(state.intent)
+            from app.agent.llm import compression_model
+            from app.research.planning.compose import PlanningLimits, compose_execution_plan
+
+            plan, issues = await compose_execution_plan(
+                state.intent,
+                model=compression_model,
+                session_id=state.session_id,
+                llm_enabled=bool(
+                    self.harness_config.planner_llm_enabled
+                    and getattr(self.harness_config, "planner_dynamic_lead_enabled", True)
+                ),
+                limits=PlanningLimits.from_config(self.harness_config),
+            )
             state.plan = plan
             if issues:
                 state.metadata["plan_validation_issues"] = issues
