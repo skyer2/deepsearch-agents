@@ -1,7 +1,8 @@
 """
 主入口：Domain Harness + Leaf WorkerRegistry。
 
-检索与合成均按步直调 create_agent Leaf，不再创建 Main DeepAgent。
+生产路径：run_deep_agent → AgentHarness.run → research_graph.ainvoke。
+检索与合成按步直调 create_agent Leaf，不再创建 Main DeepAgent。
 """
 
 import asyncio
@@ -66,7 +67,7 @@ harness = AgentHarness(
 
 
 async def run_deep_agent(task_query, session_id, *, user_id="", tenant_id="", project_id=""):
-    """异步执行入口 — 委托给 AgentHarness。"""
+    """异步执行入口 — StateGraph 为 workflow 权威，领域服务仍由 harness 提供。"""
     print(f"[MainAgent] Harness 开始执行，session_id={session_id}")
     result = await harness.run(
         task_query,

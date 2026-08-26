@@ -110,6 +110,7 @@ def test_harness_config_orchestration():
     assert cfg.enforce_subagent_binding is True
     assert cfg.direct_worker_invoke is True
     assert cfg.persist_loop_state is True
+    assert cfg.graph_runtime_enabled is True
     print("[OK] orchestration config loaded")
 
 

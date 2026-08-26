@@ -1,7 +1,8 @@
 """
-薄 StateGraph：只负责 node wiring / conditional edge / Send / interrupt。
+Research StateGraph：workflow 调度权威。
 
-业务逻辑仍在 planner、scheduler、workers、现有 harness services。
+无 runtime 时保留可单测的 placeholder worker（编译/控制结构）。
+传入 runtime=ResearchGraphRunner 后，节点调用现有 harness 领域服务。
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ def intent_node(state: ResearchState) -> dict[str, Any]:
     return {
         "intent": intent.to_dict(),
         "needs_clarification": bool(intent.needs_clarification),
+        "progress": "intent",
     }
 
 
@@ -49,6 +51,7 @@ def plan_node(state: ResearchState) -> dict[str, Any]:
         "plan_version": plan.plan_version,
         "task_status": status,
         "needs_plan_review": False,
+        "progress": "planned",
     }
 
 
@@ -59,22 +62,37 @@ def route_after_intent(state: ResearchState) -> Literal["clarify", "plan"]:
 
 
 def clarify_node(state: ResearchState) -> dict[str, Any]:
-    """HITL 澄清占位：默认自动保守解析，真正等待由外层 HITL 接入。"""
+    """无 runtime 时自动保守解析；生产路径由 runner 用 interrupt() 等待。"""
     from app.agent.harness.planner import auto_resolve_clarification
     from app.agent.harness.state import TaskIntent
 
     intent = TaskIntent.from_dict(state.get("intent") or {})
     resolved = auto_resolve_clarification(intent)
-    return {"intent": resolved.to_dict(), "needs_clarification": False}
+    return {"intent": resolved.to_dict(), "needs_clarification": False, "progress": "clarified"}
+
+
+def plan_validate_node(state: ResearchState) -> dict[str, Any]:
+    return {"needs_plan_review": False, "progress": "plan_validated"}
 
 
 def dispatch_node(state: ResearchState) -> dict[str, Any]:
-    return {}
+    return {"progress": "dispatch"}
+
+
+def _max_replan(state: ResearchState) -> int:
+    budget = state.get("budget") or {}
+    return int(budget.get("max_replan_count") or 3)
+
+
+def _has_failed_tasks(status: dict[str, str]) -> bool:
+    return any(value == "failed" for value in status.values())
 
 
 def route_dispatch(state: ResearchState) -> list[Any] | str:
     from langgraph.types import Send
 
+    if state.get("status") == "aborted" or state.get("abort_reason"):
+        return "abort"
     plan = _plan_from_state(state)
     if plan is None:
         return "finalize"
@@ -102,7 +120,9 @@ def route_dispatch(state: ResearchState) -> list[Any] | str:
         return sends
     if next_synthesis_step(plan, status) is not None and all_retrieval_done(plan, status):
         return "synthesize"
-    return "finalize"
+    if _has_failed_tasks(status) and int(state.get("replan_count") or 0) < _max_replan(state):
+        return "replan"
+    return "quality_gate"
 
 
 def research_worker_node(state: dict[str, Any]) -> dict[str, Any]:
@@ -125,6 +145,7 @@ def research_worker_node(state: dict[str, Any]) -> dict[str, Any]:
         ],
         "task_status": {task_id: "done"},
         "evidence_refs": [task_id] if task_id else [],
+        "progress": "worker",
     }
 
 
@@ -133,22 +154,47 @@ def synthesize_node(state: ResearchState) -> dict[str, Any]:
     status = dict(state.get("task_status") or {})
     nxt = next_synthesis_step(plan, status) if plan else None
     if nxt is None:
-        return {"status": "synthesized"}
+        return {"status": "synthesized", "progress": "synthesized"}
     index, step = nxt
     tid = step.resolved_task_id(index)
     status[tid] = "done"
-    return {"task_status": status, "status": "synthesized"}
+    return {"task_status": status, "status": "synthesized", "progress": "synthesized"}
+
+
+def replan_node(state: ResearchState) -> dict[str, Any]:
+    return {
+        "replan_count": int(state.get("replan_count") or 0) + 1,
+        "progress": "run",
+    }
+
+
+def quality_gate_node(state: ResearchState) -> dict[str, Any]:
+    return {"quality_passed": True, "progress": "quality"}
 
 
 def finalize_node(state: ResearchState) -> dict[str, Any]:
     return {
         "status": state.get("status") or "completed",
         "final_content": state.get("final_content") or "",
+        "progress": "done",
     }
 
 
-def compile_research_graph(*, checkpointer: Any = None, invoke_worker: Any = None):
-    """可执行的 Domain Harness 表示。invoke_worker 注入后才跑真实 Leaf。"""
+def abort_node(state: ResearchState) -> dict[str, Any]:
+    return {
+        "status": "aborted",
+        "abort_reason": state.get("abort_reason") or "aborted",
+        "progress": "abort",
+    }
+
+
+def compile_research_graph(
+    *,
+    checkpointer: Any = None,
+    invoke_worker: Any = None,
+    runtime: Any = None,
+):
+    """可执行的 Domain Harness 表示。runtime 注入后走真实 Leaf / 领域服务。"""
     from langgraph.graph import END, START, StateGraph
 
     def _worker(payload: dict[str, Any]) -> dict[str, Any]:
@@ -158,13 +204,30 @@ def compile_research_graph(*, checkpointer: Any = None, invoke_worker: Any = Non
         return research_worker_node(payload)
 
     builder = StateGraph(ResearchState)
-    builder.add_node("intent", intent_node)
-    builder.add_node("clarify", clarify_node)
-    builder.add_node("plan", plan_node)
-    builder.add_node("dispatch", dispatch_node)
-    builder.add_node("research_worker", _worker)
-    builder.add_node("synthesize", synthesize_node)
-    builder.add_node("finalize", finalize_node)
+    if runtime is not None:
+        builder.add_node("intent", runtime.node_intent)
+        builder.add_node("clarify", runtime.node_clarify)
+        builder.add_node("plan", runtime.node_plan)
+        builder.add_node("plan_validate", runtime.node_plan_validate)
+        builder.add_node("dispatch", runtime.node_dispatch)
+        builder.add_node("research_worker", runtime.node_research_worker)
+        builder.add_node("synthesize", runtime.node_synthesize)
+        builder.add_node("replan", runtime.node_replan)
+        builder.add_node("quality_gate", runtime.node_quality_gate)
+        builder.add_node("finalize", runtime.node_finalize)
+        builder.add_node("abort", runtime.node_abort)
+    else:
+        builder.add_node("intent", intent_node)
+        builder.add_node("clarify", clarify_node)
+        builder.add_node("plan", plan_node)
+        builder.add_node("plan_validate", plan_validate_node)
+        builder.add_node("dispatch", dispatch_node)
+        builder.add_node("research_worker", _worker)
+        builder.add_node("synthesize", synthesize_node)
+        builder.add_node("replan", replan_node)
+        builder.add_node("quality_gate", quality_gate_node)
+        builder.add_node("finalize", finalize_node)
+        builder.add_node("abort", abort_node)
 
     builder.add_edge(START, "intent")
     builder.add_conditional_edges(
@@ -173,15 +236,19 @@ def compile_research_graph(*, checkpointer: Any = None, invoke_worker: Any = Non
         {"clarify": "clarify", "plan": "plan"},
     )
     builder.add_edge("clarify", "plan")
-    builder.add_edge("plan", "dispatch")
+    builder.add_edge("plan", "plan_validate")
+    builder.add_edge("plan_validate", "dispatch")
     builder.add_conditional_edges(
         "dispatch",
         route_dispatch,
-        ["research_worker", "synthesize", "finalize"],
+        ["research_worker", "synthesize", "replan", "quality_gate", "abort", "finalize"],
     )
     builder.add_edge("research_worker", "dispatch")
     builder.add_edge("synthesize", "dispatch")
+    builder.add_edge("replan", "plan_validate")
+    builder.add_edge("quality_gate", "finalize")
     builder.add_edge("finalize", END)
+    builder.add_edge("abort", END)
 
     kwargs: dict[str, Any] = {}
     if checkpointer is not None:

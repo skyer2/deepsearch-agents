@@ -1,0 +1,774 @@
+"""把 AgentHarness 领域服务接到 StateGraph：图是调度权威。"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Any
+
+from app.agent.harness.planner import (
+    auto_resolve_clarification,
+    dynamic_replan,
+    plan_to_editable_dict,
+    should_request_plan_review,
+)
+from app.agent.harness.state import LoopState, Phase, StepStatus
+from app.research.runtime.scheduler import annotate_plan_tasks, task_status_map
+from app.research.runtime.state import empty_research_state
+
+logger = logging.getLogger(__name__)
+
+_SESSIONS: dict[str, "RunSession"] = {}
+
+
+class RunSession:
+    """进程内会话：LoopState 等大对象不进 Graph checkpoint。"""
+
+    def __init__(self, harness: Any, ctx: Any):
+        self.harness = harness
+        self.ctx = ctx
+        self.state: LoopState = ctx.state
+        self.run_id: str = ctx.session_id
+        self.session_id: str = ctx.session_id
+        self.lock = ctx.lock
+        self.result: Any = None
+
+
+def get_session(run_id: str) -> RunSession | None:
+    return _SESSIONS.get(run_id)
+
+
+def bind_session(session: RunSession) -> None:
+    _SESSIONS[session.run_id] = session
+
+
+def drop_session(run_id: str) -> None:
+    _SESSIONS.pop(run_id, None)
+
+
+class ResearchGraphRunner:
+    """compiled graph.ainvoke + HITL interrupt 桥接到现有 HTTP coordinator。"""
+
+    def __init__(self, harness: Any):
+        self.harness = harness
+
+    def compile(self, checkpointer: Any = None):
+        from app.research.runtime.graph import compile_research_graph
+
+        return compile_research_graph(
+            checkpointer=checkpointer or _default_checkpointer(),
+            runtime=self,
+        )
+
+    async def execute(self, ctx: Any, *, checkpointer: Any = None) -> Any:
+        from langgraph.types import Command
+
+        session = RunSession(self.harness, ctx)
+        bind_session(session)
+        session.state.metadata["graph_runtime"] = True
+        session.state.metadata["workflow_authority"] = "state_graph"
+        if ctx.restored_full:
+            waiting = dict((session.state.metadata or {}).get("hitl_waiting") or {})
+            gate = str(waiting.get("gate_type") or "")
+            if gate in {"clarification", "intent_clarification"}:
+                session.state = await self.harness._maybe_intent_clarification(session.state)
+            elif gate == "plan_review":
+                session.state = await self.harness._maybe_plan_hitl_review(session.state)
+        config = {
+            "configurable": {"thread_id": session.run_id},
+            "recursion_limit": 80,
+        }
+        payload = empty_research_state(
+            run_id=session.run_id,
+            session_id=session.session_id,
+            task_query=ctx.task_query,
+            user_id=ctx.user_id,
+            tenant_id=ctx.tenant_id,
+            project_id=ctx.project_id,
+            max_tool_calls=self.harness.harness_config.max_tool_calls,
+            max_replan_count=self.harness.harness_config.max_replan_count,
+        )
+        if ctx.restored_full and session.state.intent is not None:
+            payload["intent"] = session.state.intent.to_dict()
+            payload["needs_clarification"] = False
+        if ctx.restored_full and session.state.plan is not None:
+            payload["plan"] = session.state.plan.to_dict()
+            payload["plan_version"] = int(getattr(session.state.plan, "plan_version", 1) or 1)
+            payload["task_status"] = task_status_map(session.state.plan)
+        try:
+            graph = self.compile(checkpointer=checkpointer)
+            result = await _ainvoke_resilient(graph, payload, config)
+            while _has_interrupt(result):
+                resume_value = await self._bridge_interrupts(result, session)
+                result = await _ainvoke_resilient(
+                    graph, Command(resume=resume_value), config
+                )
+            if session.result is not None:
+                return session.result
+            return await self._complete_from_graph(session, result)
+        finally:
+            drop_session(session.run_id)
+
+    async def _bridge_interrupts(self, result: dict[str, Any], session: RunSession) -> Any:
+        """图内 interrupt() 暂停后，用现有 coordinator 等前端 POST /resume。"""
+        from app.agent.harness.hitl import hitl_coordinator
+        from app.api.monitor import monitor
+
+        payloads = _interrupt_payloads(result)
+        if not payloads:
+            return True
+        item = payloads[0]
+        coordinator_payload = dict(item.get("coordinator_payload") or item)
+        gate_type = str(
+            coordinator_payload.get("gate_type")
+            or item.get("kind")
+            or "step"
+        )
+        step_index = int(coordinator_payload.get("step_index", item.get("step_index", -1)))
+        action_requests = list(coordinator_payload.get("action_requests") or [])
+        review_configs = list(coordinator_payload.get("review_configs") or [])
+        monitor.report_hitl_interrupt(
+            session.session_id,
+            action_requests,
+            review_configs,
+            step_index=step_index,
+            gate_type=gate_type,
+            editable=self.harness.harness_config.hitl_allow_edit,
+        )
+        await self.harness._persist_hitl_waiting(
+            session.state,
+            {
+                "gate_type": gate_type,
+                "step_index": step_index,
+                "payload": coordinator_payload,
+            },
+        )
+        try:
+            decisions = await hitl_coordinator.wait_for_decisions(
+                session.session_id,
+                coordinator_payload,
+                timeout_sec=self.harness.harness_config.hitl_timeout_sec,
+            )
+        except TimeoutError:
+            await self.harness._clear_hitl_waiting(session.state)
+            return {"_timeout": True, "kind": item.get("kind")}
+        await self.harness._clear_hitl_waiting(session.state)
+        return decisions
+
+    async def _complete_from_graph(self, session: RunSession, graph_result: dict[str, Any]) -> Any:
+        ctx = session.ctx
+        state = session.state
+        if graph_result.get("status") == "aborted" or state.abort_reason:
+            success = False
+        else:
+            success = True
+        return await self._finalize_run(session, success=success)
+
+    async def _finalize_run(self, session: RunSession, *, success: bool) -> Any:
+        ctx = session.ctx
+        state = session.state
+        citation_manager = ctx.citation_manager
+        if citation_manager and state.final_content:
+            cited = citation_manager.build_cited_report(state.final_content)
+            state.final_content = cited
+            metrics = citation_manager.compute_metrics(cited)
+            state.citation_coverage_rate = metrics["citation_coverage_rate"]
+            state.hallucination_rate = metrics["hallucination_rate"]
+            state.evidence_source_count = metrics["registered_sources"]
+            state.numeric_citation_coverage = float(
+                metrics.get("numeric_citation_coverage") or 0.0
+            )
+            citation_manager.save_evidence_json(ctx.session_dir)
+
+        finalize_outcome = self.harness.validator.validate_finalize(
+            state,
+            ctx.session_dir,
+            citation_manager=citation_manager,
+            min_citation_coverage=self.harness.harness_config.citations_min_coverage_rate,
+        )
+        await self.harness._phase_validate(
+            state,
+            finalize_outcome,
+            step_index=state.step_index,
+            scope="finalize",
+        )
+        ok = (
+            (finalize_outcome.passed or finalize_outcome.severity == "warning")
+            and not state.abort_reason
+            and success
+        )
+        result = await self.harness._phase_finalize(
+            state,
+            ctx.session_dir,
+            success=ok,
+            started_at=ctx.run_started,
+        )
+        session.result = result
+        return result
+
+    # --- nodes ---
+
+    async def node_intent(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        session = _require_session(gstate)
+        state = session.state
+        ctx = session.ctx
+        if state.intent is not None and ctx.restored_full:
+            needs = False
+        else:
+            session.state = await self.harness._phase_understand(
+                state,
+                ctx.task_query,
+                bool(ctx.uploaded_prompt),
+            )
+            state = session.state
+            needs = bool(
+                self.harness.harness_config.hitl_enabled
+                and self.harness.harness_config.planner_clarification_enabled
+                and state.intent is not None
+                and state.intent.needs_clarification
+                and not state.intent.clarification_resolved
+            )
+            if needs and self.harness.harness_config.planner_clarification_auto_resolve:
+                state.intent = auto_resolve_clarification(state.intent)
+                needs = False
+        return {
+            "intent": state.intent.to_dict() if state.intent is not None else None,
+            "needs_clarification": needs,
+            "progress": "intent",
+        }
+
+    async def node_clarify(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from langgraph.types import interrupt
+
+        session = _require_session(gstate)
+        state = session.state
+        if state.intent is None:
+            return {"needs_clarification": False, "progress": "clarified"}
+        if (
+            not self.harness.harness_config.hitl_enabled
+            or self.harness.harness_config.planner_clarification_auto_resolve
+        ):
+            state.intent = auto_resolve_clarification(state.intent)
+            return {
+                "intent": state.intent.to_dict(),
+                "needs_clarification": False,
+                "progress": "clarified",
+            }
+        payload = _clarification_payload(self.harness, state)
+        resume = interrupt({"kind": "clarify", "coordinator_payload": payload})
+        if _is_timeout(resume):
+            state.intent = auto_resolve_clarification(state.intent)
+        else:
+            session.state = self.harness._apply_hitl_decisions(
+                state, _as_decisions(resume), step=None, step_index=-1
+            )
+            await self.harness._flush_hitl_memories(session.state)
+        state = session.state
+        return {
+            "intent": state.intent.to_dict() if state.intent is not None else None,
+            "needs_clarification": False,
+            "progress": "clarified",
+        }
+
+    async def node_plan(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        session = _require_session(gstate)
+        ctx = session.ctx
+        if session.state.plan is not None and ctx.restored_full:
+            plan = session.state.plan
+        else:
+            session.state = await self.harness._phase_plan(session.state)
+            if session.state.plan is not None:
+                session.state.plan = annotate_plan_tasks(session.state.plan)
+            plan = session.state.plan
+        if plan is None or not plan.steps:
+            session.state.abort_reason = "empty_plan"
+            session.state.abort_message = "Harness plan is empty"
+            return {"status": "aborted", "abort_reason": "empty_plan", "plan": None}
+        needs_review = bool(
+            not ctx.restored_full
+            and self.harness.harness_config.hitl_enabled
+            and self.harness.harness_config.hitl_plan_review_enabled
+            and session.state.intent is not None
+            and should_request_plan_review(
+                session.state.intent,
+                min_confidence=self.harness.harness_config.planner_plan_review_min_confidence,
+            )
+        )
+        return {
+            "plan": plan.to_dict(),
+            "plan_version": int(getattr(plan, "plan_version", 1) or 1),
+            "task_status": task_status_map(plan),
+            "needs_plan_review": needs_review,
+            "progress": "planned",
+        }
+
+    async def node_plan_validate(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from langgraph.types import interrupt
+
+        session = _require_session(gstate)
+        ctx = session.ctx
+        state = session.state
+        if state.abort_reason:
+            return {
+                "status": "aborted",
+                "abort_reason": state.abort_reason,
+                "needs_plan_review": False,
+                "progress": "abort",
+            }
+        if gstate.get("needs_plan_review"):
+            payload = _plan_review_payload(self.harness, state)
+            resume = interrupt({"kind": "plan_review", "coordinator_payload": payload})
+            if not _is_timeout(resume):
+                session.state = self.harness._apply_hitl_decisions(
+                    state, _as_decisions(resume), step=None, step_index=-1
+                )
+                await self.harness._flush_hitl_memories(session.state)
+                state = session.state
+                if state.plan is not None:
+                    state.plan = annotate_plan_tasks(state.plan)
+        if not ctx.context_built:
+            session.state = await self.harness._phase_build_context(
+                session.state, ctx.task_query
+            )
+            from app.api.monitor import monitor
+
+            monitor.report_session_dir(str(ctx.session_dir).replace("\\", "/"))
+            ctx.context_built = True
+        plan = session.state.plan
+        return {
+            "plan": plan.to_dict() if plan is not None else None,
+            "plan_version": int(getattr(plan, "plan_version", 1) or 1) if plan else 1,
+            "task_status": task_status_map(plan) if plan else {},
+            "needs_plan_review": False,
+            "progress": "plan_validated",
+        }
+
+    async def node_dispatch(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        session = get_session(str(gstate.get("run_id") or ""))
+        if session is None or session.state.plan is None:
+            return {"progress": "dispatch"}
+        if self.harness._apply_run_guardrails(session.state, session.ctx.run_started):
+            return {
+                "status": "aborted",
+                "abort_reason": session.state.abort_reason or "guardrail",
+                "progress": "abort",
+            }
+        plan = session.state.plan
+        return {
+            "plan": plan.to_dict(),
+            "plan_version": int(getattr(plan, "plan_version", 1) or 1),
+            "task_status": task_status_map(plan),
+            "replan_count": session.state.replan_count,
+            "progress": "dispatch",
+        }
+
+    async def node_research_worker(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from langgraph.types import interrupt
+
+        session = get_session(str(gstate.get("run_id") or ""))
+        step_index = int(gstate.get("step_index") or 0)
+        task_id = str(gstate.get("task_id") or f"s{step_index}")
+        step_type = str(gstate.get("step_type") or "")
+        if session is None or session.state.plan is None:
+            return _failed_worker(task_id, step_type, "missing_session")
+        plan = session.state.plan
+        if step_index >= len(plan.steps):
+            return _failed_worker(task_id, step_type, "missing_step")
+        step = plan.steps[step_index]
+        cfg = self.harness.harness_config
+        if cfg.hitl_enabled and step.step_type in set(cfg.hitl_step_gate_types):
+            payload = _step_gate_payload(self.harness, step, step_index)
+            resume = interrupt({"kind": "step_gate", "coordinator_payload": payload})
+            if _is_timeout(resume) or _rejected(resume):
+                step.metadata["status"] = StepStatus.FAILED.value
+                session.state.abort_reason = "step_rejected"
+                return {
+                    "status": "aborted",
+                    "abort_reason": "step_rejected",
+                    "task_status": {step.resolved_task_id(step_index): "failed"},
+                    "worker_results": [{
+                        "task_id": task_id,
+                        "ok": False,
+                        "summary": "step_rejected",
+                        "step_type": step.step_type,
+                    }],
+                }
+            session.state = self.harness._apply_hitl_decisions(
+                session.state, _as_decisions(resume), step, step_index
+            )
+            await self.harness._flush_hitl_memories(session.state)
+            session.state.metadata["graph_step_gated"] = True
+        session.state.step_index = step_index
+        step.metadata["status"] = StepStatus.RUNNING.value
+        async with session.lock:
+            ok = await self.harness._run_single_step(
+                session.state,
+                step,
+                step_index,
+                session.ctx.task_query,
+                session.ctx.relative_session_dir,
+                session.ctx.uploaded_prompt,
+                session.session_id,
+                session.ctx.session_dir,
+                session.ctx.citation_manager,
+                session.ctx.idempotency,
+                session.ctx.checkpoint_store,
+            )
+            session.state.step_validation_results.append(
+                {
+                    "step_index": step_index,
+                    "step_type": step.step_type,
+                    "passed": ok,
+                    "parallel": True,
+                }
+            )
+            step.metadata["status"] = (
+                StepStatus.DONE.value if ok else StepStatus.FAILED.value
+            )
+            session.state.metadata.pop("graph_step_gated", None)
+        summary = ""
+        if session.state.step_results:
+            last = session.state.step_results[-1]
+            summary = str(getattr(last, "content", "") or "")[:400]
+        tid = step.resolved_task_id(step_index)
+        return {
+            "worker_results": [{
+                "task_id": tid,
+                "ok": bool(ok),
+                "summary": summary,
+                "step_type": step.step_type,
+                "payload": {"summary": summary, "facts": [], "sources": []},
+            }],
+            "task_status": {tid: "done" if ok else "failed"},
+            "evidence_refs": [tid] if ok else [],
+            "progress": "worker",
+        }
+
+    async def node_synthesize(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.research.runtime.scheduler import next_synthesis_step
+
+        session = _require_session(gstate)
+        plan = session.state.plan
+        if plan is None:
+            return {"status": "synthesized", "progress": "synthesized"}
+        status = task_status_map(plan)
+        nxt = next_synthesis_step(plan, status)
+        if nxt is None:
+            return {"status": "synthesized", "progress": "synthesized", "task_status": status}
+        index, step = nxt
+        session.state.step_index = index
+        step.metadata["status"] = StepStatus.RUNNING.value
+        async with session.lock:
+            ok = await self.harness._run_single_step(
+                session.state,
+                step,
+                index,
+                session.ctx.task_query,
+                session.ctx.relative_session_dir,
+                session.ctx.uploaded_prompt,
+                session.session_id,
+                session.ctx.session_dir,
+                session.ctx.citation_manager,
+                session.ctx.idempotency,
+                session.ctx.checkpoint_store,
+            )
+            session.state.step_validation_results.append(
+                {
+                    "step_index": index,
+                    "step_type": step.step_type,
+                    "passed": ok,
+                }
+            )
+            step.metadata["status"] = (
+                StepStatus.DONE.value if ok else StepStatus.FAILED.value
+            )
+        tid = step.resolved_task_id(index)
+        return {
+            "task_status": {tid: "done" if ok else "failed"},
+            "status": "synthesized" if ok else "running",
+            "progress": "synthesized",
+        }
+
+    async def node_replan(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        from app.agent.harness.guardrails import can_replan
+
+        session = _require_session(gstate)
+        state = session.state
+        if state.plan is None:
+            return {"progress": "run"}
+        failed_index = None
+        for index, step in enumerate(state.plan.steps):
+            if str(step.metadata.get("status") or "") == StepStatus.FAILED.value:
+                failed_index = index
+        if failed_index is None or not can_replan(state, self.harness.harness_config):
+            return {"progress": "run"}
+        state.plan = dynamic_replan(state.plan, failed_index, "step_failed")
+        state.plan = annotate_plan_tasks(state.plan)
+        state.replan_count += 1
+        self.harness._report_phase(
+            Phase.REPLAN,
+            "done",
+            state=state,
+            step_index=failed_index,
+            reason="step_failed",
+            new_steps=len(state.plan.steps),
+        )
+        return {
+            "plan": state.plan.to_dict(),
+            "plan_version": int(getattr(state.plan, "plan_version", 1) or 1),
+            "task_status": task_status_map(state.plan),
+            "replan_count": state.replan_count,
+            "progress": "run",
+        }
+
+    async def node_quality_gate(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        session = _require_session(gstate)
+        ctx = session.ctx
+        state = session.state
+        citation_manager = ctx.citation_manager
+        if citation_manager and state.final_content:
+            cited = citation_manager.build_cited_report(state.final_content)
+            state.final_content = cited
+            metrics = citation_manager.compute_metrics(cited)
+            state.citation_coverage_rate = metrics["citation_coverage_rate"]
+            state.hallucination_rate = metrics["hallucination_rate"]
+            state.evidence_source_count = metrics["registered_sources"]
+            state.numeric_citation_coverage = float(
+                metrics.get("numeric_citation_coverage") or 0.0
+            )
+            citation_manager.save_evidence_json(ctx.session_dir)
+        outcome = self.harness.validator.validate_finalize(
+            state,
+            ctx.session_dir,
+            citation_manager=citation_manager,
+            min_citation_coverage=self.harness.harness_config.citations_min_coverage_rate,
+        )
+        await self.harness._phase_validate(
+            state,
+            outcome,
+            step_index=state.step_index,
+            scope="finalize",
+        )
+        passed = bool(outcome.passed or outcome.severity == "warning")
+        return {
+            "quality_passed": passed,
+            "final_content": state.final_content,
+            "progress": "quality",
+        }
+
+    async def node_finalize(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        session = _require_session(gstate)
+        success = bool(gstate.get("quality_passed", True)) and not session.state.abort_reason
+        result = await self.harness._phase_finalize(
+            session.state,
+            session.ctx.session_dir,
+            success=success,
+            started_at=session.ctx.run_started,
+        )
+        session.result = result
+        return {
+            "status": "completed" if result.status != "failed" else "aborted",
+            "final_content": session.state.final_content,
+            "artifacts": list(result.artifacts),
+            "progress": "done",
+        }
+
+    async def node_abort(self, gstate: dict[str, Any]) -> dict[str, Any]:
+        session = get_session(str(gstate.get("run_id") or ""))
+        if session is None:
+            return {
+                "status": "aborted",
+                "abort_reason": str(gstate.get("abort_reason") or "aborted"),
+                "progress": "abort",
+            }
+        self.harness._report_phase(
+            Phase.ABORT,
+            session.state.abort_reason or "guardrail",
+            state=session.state,
+            tool_calls=session.state.tool_calls_count,
+            abort_reason=session.state.abort_reason,
+            abort_message=session.state.abort_message,
+        )
+        result = await self.harness._phase_finalize(
+            session.state,
+            session.ctx.session_dir,
+            success=False,
+            started_at=session.ctx.run_started,
+        )
+        session.result = result
+        return {
+            "status": "aborted",
+            "abort_reason": session.state.abort_reason or "aborted",
+            "artifacts": list(result.artifacts),
+            "progress": "abort",
+        }
+
+
+def _require_session(gstate: dict[str, Any]) -> RunSession:
+    session = get_session(str(gstate.get("run_id") or ""))
+    if session is None:
+        raise RuntimeError("research graph session missing")
+    return session
+
+
+def _failed_worker(task_id: str, step_type: str, reason: str) -> dict[str, Any]:
+    return {
+        "worker_results": [{
+            "task_id": task_id,
+            "ok": False,
+            "summary": reason,
+            "step_type": step_type,
+        }],
+        "task_status": {task_id: "failed"},
+        "progress": "worker",
+    }
+
+
+def _default_checkpointer():
+    try:
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        return InMemorySaver()
+    except ImportError:
+        try:
+            from langgraph.checkpoint.memory import MemorySaver
+
+            return MemorySaver()
+        except ImportError:
+            return None
+
+
+async def _ainvoke_resilient(graph: Any, payload: Any, config: dict[str, Any]) -> Any:
+    try:
+        return await graph.ainvoke(payload, config)
+    except Exception as exc:
+        if type(exc).__name__ not in {"GraphInterrupt", "NodeInterrupt", "GraphBubbleUp"}:
+            raise
+        interrupts = _interrupt_from_exception(exc)
+        if interrupts is not None:
+            return {"__interrupt__": interrupts}
+        raise
+
+
+def _interrupt_from_exception(exc: BaseException) -> list[Any] | None:
+    name = type(exc).__name__
+    if "Interrupt" not in name and "interrupt" not in str(exc).lower():
+        return None
+    for attr in ("args", "interrupts"):
+        value = getattr(exc, attr, None)
+        if value:
+            return list(value) if not isinstance(value, list) else value
+    return [exc]
+
+
+def _has_interrupt(result: Any) -> bool:
+    if not isinstance(result, dict):
+        return False
+    return bool(result.get("__interrupt__"))
+
+
+def _interrupt_payloads(result: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = result.get("__interrupt__") or []
+    payloads: list[dict[str, Any]] = []
+    for item in raw:
+        value = getattr(item, "value", item)
+        if isinstance(value, dict):
+            payloads.append(value)
+        elif hasattr(item, "value") and isinstance(item.value, dict):
+            payloads.append(item.value)
+    return payloads
+
+
+def _clarification_payload(harness: Any, state: LoopState) -> dict[str, Any]:
+    intent = state.intent
+    allowed = ["approve", "reject"]
+    if harness.harness_config.hitl_allow_edit:
+        allowed.append("edit")
+    return {
+        "action_requests": [
+            {
+                "name": "task_intent",
+                "args": {
+                    "question": intent.clarification_question if intent else "",
+                    "intent": intent.to_dict() if intent else {},
+                    "suggested_deliverables": ["text", "md", "pdf"],
+                },
+            }
+        ],
+        "review_configs": [{"action_name": "task_intent", "allowed_decisions": allowed}],
+        "gate_type": "intent_clarification",
+        "editable": harness.harness_config.hitl_allow_edit,
+        "step_index": -1,
+    }
+
+
+def _plan_review_payload(harness: Any, state: LoopState) -> dict[str, Any]:
+    allowed = ["approve", "reject"]
+    if harness.harness_config.hitl_allow_edit:
+        allowed.append("edit")
+    return {
+        "action_requests": [
+            {
+                "name": "execution_plan",
+                "args": {
+                    "summary": state.plan.summary if state.plan else "",
+                    "steps": plan_to_editable_dict(state.plan) if state.plan else [],
+                    "intent": state.intent.to_dict() if state.intent else {},
+                    "intent_confidence": state.intent.intent_confidence if state.intent else 1.0,
+                },
+            }
+        ],
+        "review_configs": [
+            {"action_name": "execution_plan", "allowed_decisions": allowed}
+        ],
+        "gate_type": "plan_review",
+        "editable": harness.harness_config.hitl_allow_edit,
+        "step_index": -1,
+    }
+
+
+def _step_gate_payload(harness: Any, step: Any, step_index: int) -> dict[str, Any]:
+    allowed = ["approve", "reject"]
+    if harness.harness_config.hitl_allow_edit:
+        allowed.append("edit")
+    return {
+        "action_requests": [
+            {
+                "name": step.step_type,
+                "args": {
+                    "description": step.description,
+                    "subagent": step.subagent,
+                },
+            }
+        ],
+        "review_configs": [
+            {"action_name": step.step_type, "allowed_decisions": allowed}
+        ],
+        "step_index": step_index,
+        "gate_type": "step",
+        "editable": harness.harness_config.hitl_allow_edit,
+    }
+
+
+def _as_decisions(resume: Any) -> list[dict[str, Any]]:
+    if resume is True or resume == "approve":
+        return [{"type": "approve"}]
+    if isinstance(resume, list):
+        return [item if isinstance(item, dict) else {"type": str(item)} for item in resume]
+    if isinstance(resume, dict):
+        if "type" in resume or "action" in resume:
+            return [resume]
+        if resume.get("decisions"):
+            return list(resume["decisions"])
+    return [{"type": "approve"}]
+
+
+def _is_timeout(resume: Any) -> bool:
+    return isinstance(resume, dict) and bool(resume.get("_timeout"))
+
+
+def _rejected(resume: Any) -> bool:
+    for item in _as_decisions(resume):
+        if str(item.get("type") or item.get("action") or "") == "reject":
+            return True
+    return False

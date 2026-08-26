@@ -11,12 +11,25 @@ from typing import Any
 from app.research.workers.prompts import SYNTHESIS_PROMPT_ADDENDUM, WORKER_PROMPT_ADDENDUM
 from app.research.workers.registry import (
     DIRECT_STEP_TYPES,
+    UnsupportedTaskType,
     build_worker_registry,
     resolve_execute_target,
     worker_tools_for_step,
 )
 
 DIRECT_WORKER_STEP_TYPES = DIRECT_STEP_TYPES
+
+__all__ = [
+    "DIRECT_STEP_TYPES",
+    "DIRECT_WORKER_STEP_TYPES",
+    "UnsupportedTaskType",
+    "SYNTHESIS_PROMPT_ADDENDUM",
+    "WORKER_PROMPT_ADDENDUM",
+    "build_worker_graphs",
+    "build_worker_registry",
+    "resolve_execute_target",
+    "worker_tools_for_step",
+]
 
 
 def build_worker_graphs(

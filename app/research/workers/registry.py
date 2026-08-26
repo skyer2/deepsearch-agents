@@ -21,6 +21,10 @@ STEP_KINDS: dict[str, str] = {
     "summarize": "create_agent",
 }
 
+class UnsupportedTaskType(KeyError):
+    """Planner 产出了 WorkerRegistry 未注册的 step_type。"""
+
+
 DIRECT_STEP_TYPES = frozenset(STEP_KINDS)
 
 
@@ -67,12 +71,14 @@ def resolve_execute_target(
     main_agent: Any = None,
     direct_invoke: bool = True,
 ) -> tuple[Any, str]:
-    """计划指定谁干就调谁。main_agent 仅作未注册 step 的兼容回退。"""
-    if direct_invoke and workers and workers.get(step_type) is not None:
+    """计划指定谁干就调谁。未注册 step 默认 fail-closed，禁止落到合成工人。"""
+    if not direct_invoke:
+        if main_agent is not None:
+            return main_agent, "main"
+        raise UnsupportedTaskType(step_type)
+    if workers and workers.get(step_type) is not None:
         return workers[step_type], "direct"
-    if main_agent is not None:
-        return main_agent, "main"
-    raise KeyError(f"no worker registered for step_type={step_type}")
+    raise UnsupportedTaskType(step_type)
 
 
 def _file_tool_map() -> dict[str, Any]:
@@ -95,9 +101,9 @@ def build_worker_registry(
     from app.agent.subagents.database_query_agent import build_database_query_agent
     from app.agent.subagents.knowledge_base_agent import build_knowledge_base_agent
     from app.agent.subagents.network_search_agent import build_network_search_agent
-    from app.agent.prompts import main_agent_content
     from app.mcp.client import get_db_tools, get_internet_search_tool, get_ragflow_tools
     from app.research.workers.factory import create_research_worker, create_synthesis_worker
+    from app.research.workers.prompts import SYNTHESIS_SYSTEM_PROMPT
 
     kind_map = dict(STEP_KINDS)
     if kinds:
@@ -107,7 +113,7 @@ def build_worker_registry(
     db = build_database_query_agent()
     kb = build_knowledge_base_agent()
     files = _file_tool_map()
-    synthesis_prompt = str(main_agent_content.get("system_prompt") or "")
+    synthesis_prompt = SYNTHESIS_SYSTEM_PROMPT
     hitl = dict(interrupt_on or {})
 
     registry = WorkerRegistry()

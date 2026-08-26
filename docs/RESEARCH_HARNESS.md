@@ -9,6 +9,7 @@ Deep Research Domain Harness     Intent / Plan / Policy / Eval / Evidence
         │
         ▼
 LangGraph StateGraph             可执行表示（node / edge / Send / interrupt）
+                                 ← 唯一 workflow authority
         │
         ▼
 LangGraph Runtime                State / Checkpoint / Stream
@@ -31,28 +32,34 @@ Leaf Agent / Tool / MCP          create_agent()；必要时才用精简 DeepAgen
 
 LangGraph 是成熟的 durable workflow runtime 之一，不是行业协议。选用它是因为本项目已依赖它，并且需要 interrupt、fan-out、subgraph、streaming。
 
-## 当前落地（Phase 21）
+## 当前落地
 
 已完成：
 
 - 删除 Main `create_deep_agent` 二次路由
-- `WorkerRegistry` 按 `step_type` 直调 `langchain.agents.create_agent` Leaf
-- 写文件 HITL：`interrupt()` 在副作用之前（PURE → HITL → SIDE EFFECT）
+- `WorkerRegistry` 按 `step_type` 直调 `langchain.agents.create_agent` Leaf；未注册 step **fail-closed**
+- 合成工人 prompt 只消费证据，不再假装调度三个专家
+- 写文件 HITL：Leaf `interrupt()` 在副作用之前（PURE → HITL → SIDE EFFECT）
+- 全局 HITL（澄清 / 计划审批 / step gate）：图内 `interrupt()`，`HitlCoordinator` 只桥接 `POST /api/task/{id}/resume`
 - Plan 带 `task_id` / `depends_on` / `plan_version`
-- 幂等键升级为 `run_id + plan_version + task_id + action_id`，并兼容旧 `step_index` 键
-- 薄 `StateGraph`（`app/research/runtime/graph.py`）已可编译；生产调度默认仍是 `AgentHarness` while（`graph_runtime_enabled: false`）
+- 幂等键：`run_id + plan_version + task_id + action_id`（兼容旧 `step_index` 键）
+- **生产入口** `run_deep_agent` → `AgentHarness.run` → `research_graph.ainvoke`（`graph_runtime_enabled: true`）
+- 并行检索走图内 `Send`，不再走生产路径上的 `asyncio.gather`
 
 刻意保留：
 
 - `IdempotencyRegistry`（checkpointer ≠ 外部副作用 exactly-once）
-- ContextBuilder / MemoryPolicy / Citation / MCP Gateway / Validator / Eval
-- `StepCheckpointStore`（Phase 3 切 graph 为唯一 workflow authority 后再删）
+- planner / ContextBuilder / MemoryPolicy / Citation / MCP Gateway / Validator / Recovery / Eval
+- `StepCheckpointStore` 仍用于 LoopState 热恢复；LangGraph checkpointer 是 interrupt/resume 权威（Postgres checkpointer 为后续加固）
+
+`AgentHarness._run_legacy_loop()` 仅在 `graph_runtime_enabled: false` 或未安装 langgraph 时回退。
 
 下一步：
 
-1. `graph_runtime_enabled: true` 后用 `Send` 替换 `asyncio.gather + deepcopy`
-2. 并行单元从数据源工人升级为 research task
-3. 合成后加 claim / citation verifier 节点
+1. 并行单元从数据源工人升级为 research task（Phase 4）
+2. 把 LoopState 热恢复完全交给 durable LangGraph checkpointer，再删除 `StepCheckpointStore`
+3. 合成后独立 claim / citation verifier 节点
+4. 删除 `check_subagent_binding` 兼容 metrics 与 Main Agent fallback 残留
 
 ## 几个 Agent？
 

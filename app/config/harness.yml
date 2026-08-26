@@ -137,7 +137,7 @@ harness:
     synthesis_use_evidence_digest: true     # 【Phase 8】写报告用 facts 证据_digest
     direct_worker_invoke: true              # 按步直调 Leaf Worker，禁止 Main Agent 二次路由
     persist_loop_state: true                # checkpoint.json 落整份 LoopState（副作用幂等仍要 IdempotencyRegistry）
-    graph_runtime_enabled: false            # true 时走 StateGraph 控制面（Phase 3，默认仍 while 调度）
+    graph_runtime_enabled: true             # 生产调度权威：Research StateGraph（legacy while 仅作回退）
 
   # 【Phase 14】工业级 Planner：结构化槽位 + 默认 LLM + 澄清 + Plan 审批
   planner:

@@ -85,6 +85,33 @@ def test_merge_worker_payloads_dedup():
     print("[OK] evidence reducer")
 
 
+def test_unregistered_step_fail_closed():
+    from app.research.workers.registry import UnsupportedTaskType, resolve_execute_target
+
+    try:
+        resolve_execute_target(
+            "some_new_step",
+            workers={"generate_markdown": object()},
+            main_agent=object(),
+            direct_invoke=True,
+        )
+        raise AssertionError("expected UnsupportedTaskType")
+    except UnsupportedTaskType:
+        pass
+    print("[OK] unregistered step fail-closed")
+
+
+def test_synthesis_prompt_is_not_supervisor():
+    from app.research.workers.prompts import SYNTHESIS_SYSTEM_PROMPT
+
+    text = SYNTHESIS_SYSTEM_PROMPT
+    assert "不调度" in text
+    assert "不进行新的" in text
+    assert "团队负责人调度" not in text
+    assert "todo-list" in text.lower() or "不要生成 todo-list" in text
+    print("[OK] synthesis prompt is leaf not supervisor")
+
+
 def test_all_step_types_direct_when_registered():
     main = object()
     workers = {
@@ -151,6 +178,8 @@ if __name__ == "__main__":
     test_annotate_plan_dag_dependencies()
     test_ready_retrieval_can_fan_out()
     test_merge_worker_payloads_dedup()
+    test_unregistered_step_fail_closed()
+    test_synthesis_prompt_is_not_supervisor()
     test_all_step_types_direct_when_registered()
     test_compile_research_graph()
     test_plan_step_roundtrip_includes_dag_fields()

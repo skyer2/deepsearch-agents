@@ -48,6 +48,8 @@ class ResearchState(TypedDict):
 
     needs_clarification: bool
     needs_plan_review: bool
+    progress: str
+    quality_passed: bool
 
 
 class WorkerTaskState(TypedDict):
@@ -104,4 +106,6 @@ def empty_research_state(
         "abort_reason": "",
         "needs_clarification": False,
         "needs_plan_review": False,
+        "progress": "run",
+        "quality_passed": False,
     }

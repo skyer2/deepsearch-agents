@@ -538,7 +538,7 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
         ),
         graph_runtime_enabled=_env_bool(
             "HARNESS_GRAPH_RUNTIME",
-            bool(orch.get("graph_runtime_enabled", False)),
+            bool(orch.get("graph_runtime_enabled", True)),
         ),
         planner_llm_confirm_enabled=_env_bool(
             "HARNESS_PLANNER_LLM_CONFIRM",

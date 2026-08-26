@@ -71,8 +71,8 @@ def harness_capabilities() -> dict[str, Any]:
             "untrusted_context": config.context_wrap_untrusted_external,
         },
         "note": (
-            "Domain Harness 定义计划、护栏、证据与评测；LangGraph 是 execution runtime。"
-            "Leaf 为 create_agent，按 ResearchPlan 直调，不再经 Main DeepAgent 二次路由。"
+            "Domain Harness 定义计划、护栏、证据与评测；LangGraph StateGraph 是唯一 workflow authority。"
+            "Leaf 为 create_agent，按 ResearchPlan 直调。HITL 图内 interrupt()，HTTP coordinator 只做前端桥。"
             "Checkpointer 不管外部副作用，IdempotencyRegistry 仍然保留。"
         ),
     }

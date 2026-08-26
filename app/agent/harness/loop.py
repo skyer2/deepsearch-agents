@@ -16,12 +16,15 @@ Agent Harness 主循环
 【Phase 19】窗口卫生、分层预算淘汰、工作笔记、证据回读、压缩保留检查。
 【Phase 20】检索步直调工人；LoopState 为任务进度唯一权威并写入 checkpoint.json。
 【Phase 21】Domain Harness + create_agent Leaf；删除 Main DeepAgent 二次路由。
+【Phase 22】生产调度切到 Research StateGraph；while 仅作 legacy 回退。
 """
 
 import asyncio
 import copy
+import logging
 import shutil
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
@@ -95,6 +98,34 @@ from app.api.monitor import monitor
 from app.api.trace_logger import JsonlTraceLogger, get_trace_logger
 from app.api.tracing import HarnessTracer, build_run_config
 from app.config.loader import HarnessConfig, get_harness_config
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class HarnessRunContext:
+    """单次 run 的进程内句柄；大对象不进 Graph checkpoint。"""
+
+    task_query: str
+    session_id: str
+    user_id: str
+    tenant_id: str
+    project_id: str
+    state: LoopState
+    session_dir: Path
+    relative_session_dir: str
+    uploaded_prompt: str
+    tokens: tuple
+    tracer: Any
+    citation_manager: Optional[CitationManager]
+    checkpoint_store: StepCheckpointStore
+    idempotency: IdempotencyRegistry
+    identity_token: Any
+    run_started: float
+    restored_full: bool = False
+    step_index: int = 0
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    context_built: bool = False
 
 
 class AgentHarness:
@@ -227,7 +258,17 @@ class AgentHarness:
             state.obs_tool_results_cleared += cleared
         return cleared
 
-    async def run(
+    def _use_graph_runtime(self) -> bool:
+        if not getattr(self.harness_config, "graph_runtime_enabled", False):
+            return False
+        try:
+            from langgraph.graph import StateGraph  # noqa: F401
+        except ImportError:
+            logger.warning("graph_runtime_enabled 但未安装 langgraph，回退 legacy while")
+            return False
+        return True
+
+    def _bootstrap_run(
         self,
         task_query: str,
         session_id: str,
@@ -235,7 +276,7 @@ class AgentHarness:
         user_id: str = "",
         tenant_id: str = "",
         project_id: str = "",
-    ) -> HarnessResult:
+    ) -> HarnessRunContext:
         state = LoopState(session_id=session_id, max_retries=self.max_retries)
         state.metadata["strict_validation"] = self.harness_config.validation_strict_mode
         run_started = time.perf_counter()
@@ -267,220 +308,87 @@ class AgentHarness:
         state.memory_wrap_untrusted = memory_policy.wrap_untrusted
         state.metadata["memory_identity"] = identity.to_dict()
 
-        try:
-            restored_full = False
-            step_index = 0
-            if (
-                self.harness_config.step_checkpoint_enabled
-                and self.harness_config.resume_checkpoint
-                and getattr(self.harness_config, "persist_loop_state", True)
+        restored_full = False
+        step_index = 0
+        if (
+            self.harness_config.step_checkpoint_enabled
+            and self.harness_config.resume_checkpoint
+            and getattr(self.harness_config, "persist_loop_state", True)
+        ):
+            preview = checkpoint_store.load()
+            if preview and preview.get("loop_state") and self._checkpoint_matches(
+                preview, state
             ):
-                preview = checkpoint_store.load()
-                if preview and preview.get("loop_state") and self._checkpoint_matches(
-                    preview, state
-                ):
-                    state, step_index, restored_full = self._hydrate_loop_checkpoint(
-                        state,
-                        preview,
-                        idempotency,
-                        citation_manager,
-                    )
-
-            if restored_full:
-                waiting = dict((state.metadata or {}).get("hitl_waiting") or {})
-                if waiting.get("gate_type") in {"clarification", "intent_clarification"}:
-                    state = await self._maybe_intent_clarification(state)
-                elif waiting.get("gate_type") == "plan_review":
-                    state = await self._maybe_plan_hitl_review(state)
-                state = await self._phase_build_context(state, task_query)
-                monitor.report_session_dir(str(session_dir).replace("\\", "/"))
-                if waiting.get("gate_type") == "interrupt_on":
-                    state.metadata.pop("hitl_waiting", None)
-                    step_index = int(waiting.get("step_index") or step_index)
-            else:
-                state = await self._phase_understand(state, task_query, bool(uploaded_prompt))
-                state = await self._maybe_intent_clarification(state)
-                state = await self._phase_plan(state)
-                state = await self._maybe_plan_hitl_review(state)
-                state = await self._phase_build_context(state, task_query)
-                monitor.report_session_dir(str(session_dir).replace("\\", "/"))
-
-                if not state.plan or not state.plan.steps:
-                    raise RuntimeError("Harness plan is empty")
-
-                state, step_index, _ = self._try_restore_checkpoint(
+                state, step_index, restored_full = self._hydrate_loop_checkpoint(
                     state,
-                    task_query,
-                    checkpoint_store,
+                    preview,
                     idempotency,
                     citation_manager,
                 )
-                if not state.resumed_from_checkpoint:
-                    self._save_step_checkpoint(state, session_id, 0, checkpoint_store)
+        return HarnessRunContext(
+            task_query=task_query,
+            session_id=session_id,
+            user_id=user_id,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            state=state,
+            session_dir=session_dir,
+            relative_session_dir=relative_session_dir,
+            uploaded_prompt=uploaded_prompt,
+            tokens=tokens,
+            tracer=tracer,
+            citation_manager=citation_manager,
+            checkpoint_store=checkpoint_store,
+            idempotency=idempotency,
+            identity_token=identity_token,
+            run_started=run_started,
+            restored_full=restored_full,
+            step_index=step_index,
+        )
 
-            if not state.plan or not state.plan.steps:
-                raise RuntimeError("Harness plan is empty")
+    def _teardown_run(self, ctx: HarnessRunContext) -> None:
+        self._current_tracer = None
+        self._run_checkpoint_store = None
+        self._run_citation_manager = None
+        reset_session_context(ctx.tokens[0], ctx.tokens[1])
+        reset_memory_identity(ctx.identity_token)
 
-            while step_index < len(state.plan.steps):
-                step = state.plan.steps[step_index]
-                state.step_index = step_index
-                step.metadata["status"] = StepStatus.RUNNING.value
-                if self._apply_run_guardrails(state, run_started):
-                    self._report_phase(
-                        Phase.ABORT,
-                        state.abort_reason or "guardrail",
-                        state=state,
-                        tool_calls=state.tool_calls_count,
-                        abort_reason=state.abort_reason,
-                        abort_message=state.abort_message,
-                    )
-                    break
+    async def run(
+        self,
+        task_query: str,
+        session_id: str,
+        *,
+        user_id: str = "",
+        tenant_id: str = "",
+        project_id: str = "",
+    ) -> HarnessResult:
+        ctx = self._bootstrap_run(
+            task_query,
+            session_id,
+            user_id=user_id,
+            tenant_id=tenant_id,
+            project_id=project_id,
+        )
+        state = ctx.state
+        try:
+            if self._use_graph_runtime():
+                from app.research.runtime.runner import ResearchGraphRunner
 
-                batch_indices = find_parallel_batch(
-                    state.plan.steps,
-                    step_index,
-                    enabled=(
-                        self.harness_config.parallel_retrieval_enabled
-                        and not (
-                            self.harness_config.hitl_enabled
-                            and any(
-                                candidate.step_type
-                                in self.harness_config.hitl_step_gate_types
-                                for candidate in state.plan.steps[step_index:]
-                                if candidate.metadata.get("parallel_group")
-                                == step.metadata.get("parallel_group")
-                            )
-                        )
-                    ),
-                )
-                if len(batch_indices) >= 2:
-                    batch_passed = await self._run_parallel_retrieval_batch(
-                        state,
-                        batch_indices,
-                        task_query,
-                        relative_session_dir,
-                        uploaded_prompt,
-                        session_id,
-                        session_dir,
-                        citation_manager,
-                        idempotency,
-                        checkpoint_store,
-                    )
-                    for idx in batch_indices:
-                        state.step_validation_results.append(
-                            {
-                                "step_index": idx,
-                                "step_type": state.plan.steps[idx].step_type,
-                                "passed": batch_passed,
-                                "parallel": True,
-                            }
-                        )
-                    if not batch_passed:
-                        if can_replan(state, self.harness_config):
-                            state.plan = dynamic_replan(
-                                state.plan,
-                                batch_indices[-1],
-                                "step_failed",
-                            )
-                            state.replan_count += 1
-                            step_index = batch_indices[-1] + 1
-                            continue
-                        break
-                    step_index = batch_indices[-1] + 1
-                    continue
-
-                step_passed = await self._run_single_step(
-                    state,
-                    step,
-                    step_index,
-                    task_query,
-                    relative_session_dir,
-                    uploaded_prompt,
-                    session_id,
-                    session_dir,
-                    citation_manager,
-                    idempotency,
-                    checkpoint_store,
-                )
-                state.step_validation_results.append(
-                    {
-                        "step_index": step_index,
-                        "step_type": step.step_type,
-                        "passed": step_passed,
-                    }
-                )
-                if not step_passed:
-                    step.metadata["status"] = StepStatus.FAILED.value
-                    if can_replan(state, self.harness_config):
-                        state.plan = dynamic_replan(
-                            state.plan,
-                            step_index,
-                            "step_failed",
-                        )
-                        state.replan_count += 1
-                        self._report_phase(
-                            Phase.REPLAN,
-                            "done",
-                            state=state,
-                            step_index=step_index,
-                            reason="step_failed",
-                            new_steps=len(state.plan.steps),
-                        )
-                        step_index += 1
-                        continue
-                    break
-                step.metadata["status"] = StepStatus.DONE.value
-                step_index += 1
-
-            if citation_manager and state.final_content:
-                cited = citation_manager.build_cited_report(state.final_content)
-                state.final_content = cited
-                metrics = citation_manager.compute_metrics(cited)
-                state.citation_coverage_rate = metrics["citation_coverage_rate"]
-                state.hallucination_rate = metrics["hallucination_rate"]
-                state.evidence_source_count = metrics["registered_sources"]
-                state.numeric_citation_coverage = float(
-                    metrics.get("numeric_citation_coverage") or 0.0
-                )
-                citation_manager.save_evidence_json(session_dir)
-
-            finalize_outcome = self.validator.validate_finalize(
-                state,
-                session_dir,
-                citation_manager=citation_manager,
-                min_citation_coverage=self.harness_config.citations_min_coverage_rate,
-            )
-            state = await self._phase_validate(
-                state,
-                finalize_outcome,
-                step_index=state.step_index,
-                scope="finalize",
-            )
-            success = (
-                (finalize_outcome.passed or finalize_outcome.severity == "warning")
-                and not state.abort_reason
-            )
-
-            return await self._phase_finalize(
-                state,
-                session_dir,
-                success=success,
-                started_at=run_started,
-            )
-
+                return await ResearchGraphRunner(self).execute(ctx)
+            return await self._run_legacy_loop(ctx)
         except asyncio.CancelledError:
             state.abort_reason = "cancelled"
             state.abort_message = "任务被取消"
             self._report_phase(Phase.ABORT, "cancelled", state=state)
             monitor.report_task_cancelled()
-            tracer.finish({"status": "cancelled"})
+            ctx.tracer.finish({"status": "cancelled"})
             raise
         except Exception as e:
             state.abort_reason = "error"
             state.abort_message = str(e)
             self._report_phase(Phase.ABORT, "error", state=state, error=str(e))
             monitor._emit("error", f"Harness 执行异常：{str(e)}")
-            tracer.finish({"status": "failed", "error": str(e)})
+            ctx.tracer.finish({"status": "failed", "error": str(e)})
             return HarnessResult(
                 session_id=session_id,
                 status="failed",
@@ -494,11 +402,205 @@ class AgentHarness:
                 },
             )
         finally:
-            self._current_tracer = None
-            self._run_checkpoint_store = None
-            self._run_citation_manager = None
-            reset_session_context(tokens[0], tokens[1])
-            reset_memory_identity(identity_token)
+            self._teardown_run(ctx)
+
+    async def _run_legacy_loop(self, ctx: HarnessRunContext) -> HarnessResult:
+        """旧 while 调度：graph_runtime_enabled=false 或未安装 langgraph 时使用。"""
+        state = ctx.state
+        task_query = ctx.task_query
+        session_id = ctx.session_id
+        session_dir = ctx.session_dir
+        relative_session_dir = ctx.relative_session_dir
+        uploaded_prompt = ctx.uploaded_prompt
+        citation_manager = ctx.citation_manager
+        checkpoint_store = ctx.checkpoint_store
+        idempotency = ctx.idempotency
+        run_started = ctx.run_started
+        restored_full = ctx.restored_full
+        step_index = ctx.step_index
+
+        if restored_full:
+            waiting = dict((state.metadata or {}).get("hitl_waiting") or {})
+            if waiting.get("gate_type") in {"clarification", "intent_clarification"}:
+                state = await self._maybe_intent_clarification(state)
+            elif waiting.get("gate_type") == "plan_review":
+                state = await self._maybe_plan_hitl_review(state)
+            state = await self._phase_build_context(state, task_query)
+            monitor.report_session_dir(str(session_dir).replace("\\", "/"))
+            if waiting.get("gate_type") == "interrupt_on":
+                state.metadata.pop("hitl_waiting", None)
+                step_index = int(waiting.get("step_index") or step_index)
+        else:
+            state = await self._phase_understand(state, task_query, bool(uploaded_prompt))
+            state = await self._maybe_intent_clarification(state)
+            state = await self._phase_plan(state)
+            state = await self._maybe_plan_hitl_review(state)
+            state = await self._phase_build_context(state, task_query)
+            monitor.report_session_dir(str(session_dir).replace("\\", "/"))
+
+            if not state.plan or not state.plan.steps:
+                raise RuntimeError("Harness plan is empty")
+
+            state, step_index, _ = self._try_restore_checkpoint(
+                state,
+                task_query,
+                checkpoint_store,
+                idempotency,
+                citation_manager,
+            )
+            if not state.resumed_from_checkpoint:
+                self._save_step_checkpoint(state, session_id, 0, checkpoint_store)
+
+        if not state.plan or not state.plan.steps:
+            raise RuntimeError("Harness plan is empty")
+
+        while step_index < len(state.plan.steps):
+            step = state.plan.steps[step_index]
+            state.step_index = step_index
+            step.metadata["status"] = StepStatus.RUNNING.value
+            if self._apply_run_guardrails(state, run_started):
+                self._report_phase(
+                    Phase.ABORT,
+                    state.abort_reason or "guardrail",
+                    state=state,
+                    tool_calls=state.tool_calls_count,
+                    abort_reason=state.abort_reason,
+                    abort_message=state.abort_message,
+                )
+                break
+
+            batch_indices = find_parallel_batch(
+                state.plan.steps,
+                step_index,
+                enabled=(
+                    self.harness_config.parallel_retrieval_enabled
+                    and not (
+                        self.harness_config.hitl_enabled
+                        and any(
+                            candidate.step_type
+                            in self.harness_config.hitl_step_gate_types
+                            for candidate in state.plan.steps[step_index:]
+                            if candidate.metadata.get("parallel_group")
+                            == step.metadata.get("parallel_group")
+                        )
+                    )
+                ),
+            )
+            if len(batch_indices) >= 2:
+                batch_passed = await self._run_parallel_retrieval_batch(
+                    state,
+                    batch_indices,
+                    task_query,
+                    relative_session_dir,
+                    uploaded_prompt,
+                    session_id,
+                    session_dir,
+                    citation_manager,
+                    idempotency,
+                    checkpoint_store,
+                )
+                for idx in batch_indices:
+                    state.step_validation_results.append(
+                        {
+                            "step_index": idx,
+                            "step_type": state.plan.steps[idx].step_type,
+                            "passed": batch_passed,
+                            "parallel": True,
+                        }
+                    )
+                if not batch_passed:
+                    if can_replan(state, self.harness_config):
+                        state.plan = dynamic_replan(
+                            state.plan,
+                            batch_indices[-1],
+                            "step_failed",
+                        )
+                        state.replan_count += 1
+                        step_index = batch_indices[-1] + 1
+                        continue
+                    break
+                step_index = batch_indices[-1] + 1
+                continue
+
+            step_passed = await self._run_single_step(
+                state,
+                step,
+                step_index,
+                task_query,
+                relative_session_dir,
+                uploaded_prompt,
+                session_id,
+                session_dir,
+                citation_manager,
+                idempotency,
+                checkpoint_store,
+            )
+            state.step_validation_results.append(
+                {
+                    "step_index": step_index,
+                    "step_type": step.step_type,
+                    "passed": step_passed,
+                }
+            )
+            if not step_passed:
+                step.metadata["status"] = StepStatus.FAILED.value
+                if can_replan(state, self.harness_config):
+                    state.plan = dynamic_replan(
+                        state.plan,
+                        step_index,
+                        "step_failed",
+                    )
+                    state.replan_count += 1
+                    self._report_phase(
+                        Phase.REPLAN,
+                        "done",
+                        state=state,
+                        step_index=step_index,
+                        reason="step_failed",
+                        new_steps=len(state.plan.steps),
+                    )
+                    step_index += 1
+                    continue
+                break
+            step.metadata["status"] = StepStatus.DONE.value
+            step_index += 1
+
+        if citation_manager and state.final_content:
+            cited = citation_manager.build_cited_report(state.final_content)
+            state.final_content = cited
+            metrics = citation_manager.compute_metrics(cited)
+            state.citation_coverage_rate = metrics["citation_coverage_rate"]
+            state.hallucination_rate = metrics["hallucination_rate"]
+            state.evidence_source_count = metrics["registered_sources"]
+            state.numeric_citation_coverage = float(
+                metrics.get("numeric_citation_coverage") or 0.0
+            )
+            citation_manager.save_evidence_json(session_dir)
+
+        finalize_outcome = self.validator.validate_finalize(
+            state,
+            session_dir,
+            citation_manager=citation_manager,
+            min_citation_coverage=self.harness_config.citations_min_coverage_rate,
+        )
+        state = await self._phase_validate(
+            state,
+            finalize_outcome,
+            step_index=state.step_index,
+            scope="finalize",
+        )
+        success = (
+            (finalize_outcome.passed or finalize_outcome.severity == "warning")
+            and not state.abort_reason
+        )
+
+        return await self._phase_finalize(
+            state,
+            session_dir,
+            success=success,
+            started_at=run_started,
+        )
+
 
     async def _execute_and_validate_step(
         self,
@@ -676,6 +778,7 @@ class AgentHarness:
             state = await self._phase_recover(state, fail_reason, step_index)
             if (
                 can_replan(state, self.harness_config)
+                and not state.metadata.get("graph_runtime")
                 and fail_reason
                 in {"sql_empty", "search_too_short", "wrong_subagent", "step_timeout", "invalid_structured_output"}
             ):
@@ -1764,6 +1867,8 @@ class AgentHarness:
         step_index: int,
     ) -> bool:
         if not self.harness_config.hitl_enabled:
+            return True
+        if state.metadata.get("graph_runtime") or state.metadata.get("graph_step_gated"):
             return True
         if step.step_type not in self.harness_config.hitl_step_gate_types:
             return True
