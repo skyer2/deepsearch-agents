@@ -345,6 +345,42 @@ class CitationManager:
     def to_dict_list(self) -> list[dict[str, Any]]:
         return [asdict(src) for src in self.sources]
 
+    def checkpoint_snapshot(self) -> dict[str, Any]:
+        return {
+            "sources": self.to_dict_list(),
+            "fact_bindings": list(self.fact_bindings),
+            "counter": self._counter,
+        }
+
+    def load_from_snapshot(self, payload: dict[str, Any] | None) -> None:
+        if not payload:
+            return
+        rows = payload.get("sources") or []
+        self.sources = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            self.sources.append(
+                EvidenceSource(
+                    source_id=str(row.get("source_id") or ""),
+                    step_index=int(row.get("step_index") or 0),
+                    step_type=str(row.get("step_type") or ""),
+                    source_kind=str(row.get("source_kind") or "text"),
+                    locator=str(row.get("locator") or ""),
+                    excerpt=str(row.get("excerpt") or ""),
+                    timestamp=str(row.get("timestamp") or datetime.now().isoformat()),
+                    bound_fact=str(row.get("bound_fact") or ""),
+                )
+            )
+        self.fact_bindings = [
+            dict(item) for item in (payload.get("fact_bindings") or []) if isinstance(item, dict)
+        ]
+        counter = payload.get("counter")
+        if counter is not None:
+            self._counter = int(counter)
+        else:
+            self._counter = len(self.sources)
+
     def save_evidence_json(self, session_dir: Path) -> Path | None:
         if not self.sources:
             return None

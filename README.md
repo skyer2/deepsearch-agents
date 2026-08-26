@@ -35,16 +35,18 @@
 
 ### 面试一句话
 
-> 在深度研搜场景下，我实现了 per-step Harness Loop（understand → plan → execute → compress → validate → recover → finalize），接入 MCP 工具注册、跨会话记忆、Langfuse/JSONL 观测和 golden task 评测；当前是 **可演示 MVP+**，生产侧清楚还缺 HITL、Redis Checkpointer 和全量 MCP Server 集群。
+> 在深度研搜场景下，我自研了领域 Harness：显式 Loop 管计划/校验/护栏/评测；检索步按计划直调工人，主图只写文件。任务进度只认落库的 LoopState，LangGraph 只跑单步。当前是可演示 MVP+。
+
+相关说明：[Harness 架构](docs/HARNESS_ARCHITECTURE.md)
 
 ### Harness 五层架构
 
 ```text
 Layer 5  体验层     React — Phase 时间线 / 文件下载
 Layer 4  服务层     FastAPI — 任务调度 / WebSocket / GET /health
-Layer 3  Harness层  loop / validator / recovery / compressor / context_builder  ← 核心自研
-Layer 2  Runtime层  DeepAgents + LangGraph + InMemorySaver
-Layer 1  工具层     MCP Registry + Tavily MCP Server(stdio) + MySQL + RAGFlow + Memory
+Layer 3  Harness层  loop / worker_runtime / loop_state_store / validator / recovery
+Layer 2  Runtime层  按步工人图 + 合成主图（DeepAgents）+ LangGraph 单步发动机
+Layer 1  工具层     MCP Registry + Tavily / MySQL / RAGFlow + Memory
 ```
 
 ### 核心能力矩阵
@@ -52,6 +54,8 @@ Layer 1  工具层     MCP Registry + Tavily MCP Server(stdio) + MySQL + RAGFlow
 | 能力 | 实现 | 关键路径 |
 |------|------|----------|
 | 显式 Loop | per-step execute/compress/validate/recover | `app/agent/harness/loop.py` |
+| 按步工人 | 检索直调工人图，主图只写文件 | `app/agent/harness/worker_runtime.py` [架构](docs/HARNESS_ARCHITECTURE.md) |
+| LoopState 落库 | checkpoint.json 为任务进度权威 | `app/agent/harness/loop_state_store.py` |
 | 结果校验 | step + finalize 双层校验 | `app/agent/harness/validator.py` |
 | 失败恢复 | 结构化 hint + 重试上限 | `app/agent/harness/recovery.py` |
 | 上下文工程与压缩 | 分层 user message + 步级压缩 + 窗口卫生 + 证据回读 | `app/agent/harness/` [全貌](docs/CONTEXT_SYSTEM.md) [改进对照](docs/CONTEXT_IMPROVEMENTS.md) [面试](docs/CONTEXT_INTERVIEW.md) |
@@ -68,11 +72,16 @@ Layer 1  工具层     MCP Registry + Tavily MCP Server(stdio) + MySQL + RAGFlow
 用户任务 → FastAPI(thread_id)
   → AgentHarness.run()
       → understand → plan → build_context(memory recall)
-      → for each step: execute → compress → validate
+      → for each step:
+            检索步直调工人图 / 写文件走主图
+            execute → compress → validate
           → fail → recover → retry
+      → LoopState 写入 checkpoint.json
       → finalize(memory remember) → JSONL trace
   → WebSocket 推送 phase 事件 → 前端时间线
 ```
+
+架构图与教学版对照见 [docs/HARNESS_ARCHITECTURE.md](docs/HARNESS_ARCHITECTURE.md)。
 
 ### 快速验证（面试 Demo）
 
@@ -80,6 +89,7 @@ Layer 1  工具层     MCP Registry + Tavily MCP Server(stdio) + MySQL + RAGFlow
 # 1. 单元测试（无需 API Key）
 uv run python tests/test_harness_phase1.py
 uv run python tests/test_harness_phase4.py
+uv run python tests/test_harness_phase20_runtime.py
 uv run python tests/test_mcp_tavily_server.py
 
 # 2. Eval 评测 + 基线对比

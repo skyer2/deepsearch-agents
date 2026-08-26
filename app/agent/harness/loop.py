@@ -14,6 +14,8 @@ Agent Harness 主循环
 【Phase 13】运行时护栏：墙钟时限、重规划上限、计划步数上限、标准化 abort_reason。
 【Phase 14】结构化槽位 + 置信度 + HITL 歧义澄清 + 默认 LLM Planner + Plan 校验强化。
 【Phase 19】窗口卫生、分层预算淘汰、工作笔记、证据回读、压缩保留检查。
+【Phase 20】检索步直调工人；LoopState 为任务进度唯一权威并写入 checkpoint.json。
+【Phase 21】Domain Harness + create_agent Leaf；删除 Main DeepAgent 二次路由。
 """
 
 import asyncio
@@ -54,6 +56,8 @@ from app.agent.harness.orchestration import (
     task_query_fingerprint,
     validate_structured_worker_payload,
 )
+from app.agent.harness.loop_state_store import deserialize_loop_state, serialize_loop_state
+from app.agent.harness.worker_runtime import resolve_execute_target
 from app.agent.harness.guardrails import can_replan, evaluate_run_guardrails
 from app.agent.harness.observability import build_observability_snapshot
 from app.agent.harness.planner_llm import build_plan_for_intent, understand_intent
@@ -107,10 +111,14 @@ class AgentHarness:
         harness_config: Optional[HarnessConfig] = None,
         trace_logger: Optional[JsonlTraceLogger] = None,
         max_retries: Optional[int] = None,
+        workers: Optional[dict[str, Any]] = None,
     ):
         self.harness_config = harness_config or get_harness_config()
         self.agent = agent
+        self.workers = workers or {}
         self.project_root = project_root
+        self._run_checkpoint_store: Optional[StepCheckpointStore] = None
+        self._run_citation_manager: Optional[CitationManager] = None
         self.validator = validator or ResultValidator()
         self.recovery = recovery or RecoveryManager()
         self.compressor = compressor or ContextCompressor(
@@ -129,6 +137,42 @@ class AgentHarness:
         )
         self._current_tracer: Optional[HarnessTracer] = None
         self._current_trace_id: str = ""
+
+    def _agent_for_step(self, step: PlanStep) -> tuple[Any, str]:
+        return resolve_execute_target(
+            step.step_type,
+            workers=self.workers,
+            main_agent=self.agent,
+            direct_invoke=getattr(self.harness_config, "direct_worker_invoke", True),
+        )
+
+    def _action_idem_key(self, state: LoopState, step: PlanStep, step_index: int) -> str:
+        from app.research.idempotency import action_idempotency_key
+
+        plan_version = int(getattr(state.plan, "plan_version", 1) or 1) if state.plan else 1
+        return action_idempotency_key(
+            run_id=state.session_id,
+            plan_version=plan_version,
+            task_id=step.resolved_task_id(step_index),
+            action_id="execute",
+        )
+
+    def _cached_step_result(
+        self,
+        idempotency: Optional[IdempotencyRegistry],
+        state: LoopState,
+        step: PlanStep,
+        step_index: int,
+    ) -> tuple[Optional[StepResult], str]:
+        new_key = self._action_idem_key(state, step, step_index)
+        if idempotency is None:
+            return None, new_key
+        cached = idempotency.get(new_key)
+        if cached is None:
+            cached = idempotency.get(
+                step_idempotency_key(state.session_id, step_index, step.step_type)
+            )
+        return cached, new_key
 
     def _graph_thread_id(self, session_id: str, step_index: int, *, parallel: bool = False) -> str:
         if not self.harness_config.context_fresh_thread_per_step:
@@ -171,11 +215,14 @@ class AgentHarness:
         config: dict[str, Any],
         state: LoopState,
         snapshot: Any = None,
+        *,
+        agent: Any = None,
     ) -> int:
         """把过长 tool_result 换成占位符，按 message id 写回 checkpoint，供 HITL resume 继续。"""
         if not getattr(self.harness_config, "context_clear_bulky_tool_results", True):
             return 0
-        cleared = await apply_checkpoint_tool_hygiene(self.agent, config, snapshot=snapshot)
+        target = agent if agent is not None else self.agent
+        cleared = await apply_checkpoint_tool_hygiene(target, config, snapshot=snapshot)
         if cleared:
             state.obs_tool_results_cleared += cleared
         return cleared
@@ -201,6 +248,8 @@ class AgentHarness:
         self._current_tracer = tracer
         citation_manager = CitationManager() if self.harness_config.citations_enabled else None
         checkpoint_store = StepCheckpointStore(session_dir)
+        self._run_checkpoint_store = checkpoint_store
+        self._run_citation_manager = citation_manager
         idempotency = IdempotencyRegistry()
         state.task_fingerprint = task_query_fingerprint(task_query)
         memory_policy = get_memory_policy()
@@ -219,22 +268,58 @@ class AgentHarness:
         state.metadata["memory_identity"] = identity.to_dict()
 
         try:
-            state = await self._phase_understand(state, task_query, bool(uploaded_prompt))
-            state = await self._maybe_intent_clarification(state)
-            state = await self._phase_plan(state)
-            state = await self._maybe_plan_hitl_review(state)
-            state = await self._phase_build_context(state, task_query)
-            monitor.report_session_dir(str(session_dir).replace("\\", "/"))
+            restored_full = False
+            step_index = 0
+            if (
+                self.harness_config.step_checkpoint_enabled
+                and self.harness_config.resume_checkpoint
+                and getattr(self.harness_config, "persist_loop_state", True)
+            ):
+                preview = checkpoint_store.load()
+                if preview and preview.get("loop_state") and self._checkpoint_matches(
+                    preview, state
+                ):
+                    state, step_index, restored_full = self._hydrate_loop_checkpoint(
+                        state,
+                        preview,
+                        idempotency,
+                        citation_manager,
+                    )
+
+            if restored_full:
+                waiting = dict((state.metadata or {}).get("hitl_waiting") or {})
+                if waiting.get("gate_type") in {"clarification", "intent_clarification"}:
+                    state = await self._maybe_intent_clarification(state)
+                elif waiting.get("gate_type") == "plan_review":
+                    state = await self._maybe_plan_hitl_review(state)
+                state = await self._phase_build_context(state, task_query)
+                monitor.report_session_dir(str(session_dir).replace("\\", "/"))
+                if waiting.get("gate_type") == "interrupt_on":
+                    state.metadata.pop("hitl_waiting", None)
+                    step_index = int(waiting.get("step_index") or step_index)
+            else:
+                state = await self._phase_understand(state, task_query, bool(uploaded_prompt))
+                state = await self._maybe_intent_clarification(state)
+                state = await self._phase_plan(state)
+                state = await self._maybe_plan_hitl_review(state)
+                state = await self._phase_build_context(state, task_query)
+                monitor.report_session_dir(str(session_dir).replace("\\", "/"))
+
+                if not state.plan or not state.plan.steps:
+                    raise RuntimeError("Harness plan is empty")
+
+                state, step_index, _ = self._try_restore_checkpoint(
+                    state,
+                    task_query,
+                    checkpoint_store,
+                    idempotency,
+                    citation_manager,
+                )
+                if not state.resumed_from_checkpoint:
+                    self._save_step_checkpoint(state, session_id, 0, checkpoint_store)
 
             if not state.plan or not state.plan.steps:
                 raise RuntimeError("Harness plan is empty")
-
-            state, step_index = self._try_restore_checkpoint(
-                state,
-                task_query,
-                checkpoint_store,
-                idempotency,
-            )
 
             while step_index < len(state.plan.steps):
                 step = state.plan.steps[step_index]
@@ -410,6 +495,8 @@ class AgentHarness:
             )
         finally:
             self._current_tracer = None
+            self._run_checkpoint_store = None
+            self._run_citation_manager = None
             reset_session_context(tokens[0], tokens[1])
             reset_memory_identity(identity_token)
 
@@ -538,9 +625,10 @@ class AgentHarness:
         idempotency: Optional[IdempotencyRegistry] = None,
         checkpoint_store: Optional[StepCheckpointStore] = None,
     ) -> bool:
-        idem_key = step_idempotency_key(session_id, step_index, step.step_type)
+        cached, idem_key = self._cached_step_result(
+            idempotency, state, step, step_index
+        )
         if idempotency is not None:
-            cached = idempotency.get(idem_key)
             if cached is not None:
                 state.step_results.append(cached)
                 state.final_content = cached.compressed_content or cached.content
@@ -635,8 +723,7 @@ class AgentHarness:
             idx: int,
         ) -> tuple[int, bool, Optional[StepResult], str, Optional[LoopState]]:
             step = state.plan.steps[idx]
-            idem_key = step_idempotency_key(session_id, idx, step.step_type)
-            cached = idempotency.get(idem_key)
+            cached, idem_key = self._cached_step_result(idempotency, state, step, idx)
             if cached is not None:
                 return idx, True, cached, "", None
 
@@ -719,7 +806,7 @@ class AgentHarness:
             state.plan.steps[idx].metadata["status"] = StepStatus.DONE.value
 
         for idx, result, child_state in ordered:
-            idem_key = step_idempotency_key(session_id, idx, result.step_type)
+            idem_key = self._action_idem_key(state, state.plan.steps[idx], idx)
             if child_state is not None:
                 self._merge_parallel_child_state(state, child_state)
             if citation_manager is not None:
@@ -835,22 +922,24 @@ class AgentHarness:
 
         tools_invoked = list(result.metadata.get("tools_invoked") or [])
         enforce = self.harness_config.enforce_subagent_binding
-        assistants_for_binding = list(
-            result.metadata.get("step_assistants_called") or state.assistants_called
-        )
-        binding_ok, binding_reason = check_subagent_binding(
-            step,
-            assistants_for_binding,
-            enforce=enforce,
-        )
-        if not binding_ok:
-            result.metadata["binding_failed"] = True
-            result.metadata["error_code"] = binding_reason
-            payload.ok = False
-            payload.error_code = binding_reason
-            attach_structured_payload(result, payload)
-            state.obs_binding_violations += 1
-            state.obs_orchestration_violations += 1
+        dispatch = str(result.metadata.get("worker_dispatch") or "")
+        if dispatch != "direct":
+            assistants_for_binding = list(
+                result.metadata.get("step_assistants_called") or state.assistants_called
+            )
+            binding_ok, binding_reason = check_subagent_binding(
+                step,
+                assistants_for_binding,
+                enforce=enforce,
+            )
+            if not binding_ok:
+                result.metadata["binding_failed"] = True
+                result.metadata["error_code"] = binding_reason
+                payload.ok = False
+                payload.error_code = binding_reason
+                attach_structured_payload(result, payload)
+                state.obs_binding_violations += 1
+                state.obs_orchestration_violations += 1
 
         auth_ok, unauthorized = check_unauthorized_tools(
             step,
@@ -866,26 +955,86 @@ class AgentHarness:
             state.obs_orchestration_violations += 1
         return result
 
+    def _checkpoint_matches(self, data: dict[str, Any] | None, state: LoopState) -> bool:
+        if not data:
+            return False
+        if data.get("task_fingerprint") != state.task_fingerprint:
+            return False
+        if data.get("session_id") != state.session_id:
+            return False
+        return True
+
+    def _hydrate_loop_checkpoint(
+        self,
+        state: LoopState,
+        data: dict[str, Any],
+        idempotency: IdempotencyRegistry,
+        citation_manager: Optional[CitationManager],
+    ) -> tuple[LoopState, int, bool]:
+        state = deserialize_loop_state(data.get("loop_state") or {}, base=state)
+        if citation_manager is not None:
+            citation_manager.load_from_snapshot(data.get("citation_snapshot"))
+            if state.evidence_lookup and not citation_manager.sources:
+                citation_manager.load_from_snapshot({"sources": state.evidence_lookup})
+            if citation_manager.fact_bindings:
+                state.metadata["citation_fact_bindings"] = list(
+                    citation_manager.fact_bindings
+                )
+        if not state.step_results:
+            rows = data.get("step_results") or []
+            state.step_results = [
+                StepResult(
+                    step_type=str(row.get("step_type", "")),
+                    content=str(row.get("content", "")),
+                    compressed_content=row.get("compressed_content"),
+                    metadata=dict(row.get("metadata") or {}),
+                )
+                for row in rows
+                if isinstance(row, dict)
+            ]
+        keys = list(data.get("completed_step_keys") or state.completed_step_keys)
+        for key, result in zip(keys, state.step_results):
+            idempotency.register(key, result)
+        next_index = int(data.get("next_step_index") or state.step_index or 0)
+        if state.plan:
+            for idx in range(min(next_index, len(state.plan.steps))):
+                state.plan.steps[idx].metadata["status"] = StepStatus.DONE.value
+        return state, next_index, True
+
     def _try_restore_checkpoint(
         self,
         state: LoopState,
         task_query: str,
         checkpoint_store: StepCheckpointStore,
         idempotency: IdempotencyRegistry,
-    ) -> tuple[LoopState, int]:
+        citation_manager: Optional[CitationManager] = None,
+    ) -> tuple[LoopState, int, bool]:
         if not (
             self.harness_config.step_checkpoint_enabled
             and self.harness_config.resume_checkpoint
         ):
-            return state, 0
+            return state, 0, False
 
         data = checkpoint_store.load()
-        if not data:
-            return state, 0
-        if data.get("task_fingerprint") != state.task_fingerprint:
-            return state, 0
-        if data.get("session_id") != state.session_id:
-            return state, 0
+        if not self._checkpoint_matches(data, state):
+            return state, 0, False
+        assert data is not None
+
+        if data.get("loop_state") and getattr(self.harness_config, "persist_loop_state", True):
+            state, next_index, _ = self._hydrate_loop_checkpoint(
+                state, data, idempotency, citation_manager
+            )
+            for idx in range(min(next_index, len(state.plan.steps) if state.plan else 0)):
+                state.plan.steps[idx].metadata["status"] = StepStatus.DONE.value
+            self._report_phase(
+                Phase.BUILD_CONTEXT,
+                "checkpoint_resumed",
+                state=state,
+                next_step_index=next_index,
+                restored_steps=len(state.step_results),
+                authority="loop_state",
+            )
+            return state, next_index, True
 
         state.step_results = checkpoint_store.restore_step_results(data)
         state.assistants_called = list(data.get("assistants_called") or [])
@@ -893,7 +1042,7 @@ class AgentHarness:
         idempotency.load_from_checkpoint(data, checkpoint_store)
         state.resumed_from_checkpoint = True
         next_index = int(data.get("next_step_index") or 0)
-        for idx in range(min(next_index, len(state.plan.steps))):
+        for idx in range(min(next_index, len(state.plan.steps) if state.plan else 0)):
             state.plan.steps[idx].metadata["status"] = StepStatus.DONE.value
         self._report_phase(
             Phase.BUILD_CONTEXT,
@@ -901,8 +1050,9 @@ class AgentHarness:
             state=state,
             next_step_index=next_index,
             restored_steps=len(state.step_results),
+            authority="legacy",
         )
-        return state, next_index
+        return state, next_index, False
 
     def _save_step_checkpoint(
         self,
@@ -913,6 +1063,16 @@ class AgentHarness:
     ) -> None:
         if not self.harness_config.step_checkpoint_enabled or checkpoint_store is None:
             return
+        loop_payload = None
+        citation_snapshot = None
+        if getattr(self.harness_config, "persist_loop_state", True):
+            loop_payload = serialize_loop_state(state)
+            loop_payload["step_index"] = next_step_index
+            if self._run_citation_manager is not None:
+                citation_snapshot = self._run_citation_manager.checkpoint_snapshot()
+                loop_payload["citation_fact_bindings"] = list(
+                    self._run_citation_manager.fact_bindings
+                )
         checkpoint_store.save(
             session_id=session_id,
             task_fingerprint=state.task_fingerprint,
@@ -921,7 +1081,29 @@ class AgentHarness:
             assistants_called=state.assistants_called,
             completed_keys=state.completed_step_keys,
             plan_summary=state.plan.summary if state.plan else "",
+            loop_state=loop_payload,
+            citation_snapshot=citation_snapshot,
         )
+
+    async def _persist_hitl_waiting(
+        self,
+        state: LoopState,
+        waiting: dict[str, Any],
+    ) -> None:
+        state.metadata["hitl_waiting"] = waiting
+        store = self._run_checkpoint_store
+        if store is None:
+            return
+        self._save_step_checkpoint(state, state.session_id, max(0, state.step_index), store)
+
+    async def _clear_hitl_waiting(self, state: LoopState) -> None:
+        if "hitl_waiting" in (state.metadata or {}):
+            state.metadata.pop("hitl_waiting", None)
+            store = self._run_checkpoint_store
+            if store is not None:
+                self._save_step_checkpoint(
+                    state, state.session_id, max(0, state.step_index), store
+                )
 
     def _prepare_session(self, session_id: str):
         session_dir = self.project_root / "output" / f"session_{session_id}"
@@ -1047,6 +1229,14 @@ class AgentHarness:
             state=state,
             gate_type="intent_clarification",
         )
+        await self._persist_hitl_waiting(
+            state,
+            {
+                "gate_type": "intent_clarification",
+                "step_index": -1,
+                "payload": payload,
+            },
+        )
         try:
             decisions = await hitl_coordinator.wait_for_decisions(
                 state.session_id,
@@ -1056,6 +1246,8 @@ class AgentHarness:
         except TimeoutError:
             state.intent = auto_resolve_clarification(state.intent)
             return state
+        finally:
+            await self._clear_hitl_waiting(state)
 
         state = self._apply_hitl_decisions(state, decisions, step=None, step_index=-1)
         await self._flush_hitl_memories(state)
@@ -1141,6 +1333,14 @@ class AgentHarness:
             editable=self.harness_config.hitl_allow_edit,
         )
         self._report_phase(Phase.PLAN, "awaiting_approval", state=state, gate_type="plan_review")
+        await self._persist_hitl_waiting(
+            state,
+            {
+                "gate_type": "plan_review",
+                "step_index": -1,
+                "payload": payload,
+            },
+        )
         try:
             decisions = await hitl_coordinator.wait_for_decisions(
                 state.session_id,
@@ -1149,6 +1349,8 @@ class AgentHarness:
             )
         except TimeoutError:
             return state
+        finally:
+            await self._clear_hitl_waiting(state)
 
         state = self._apply_hitl_decisions(state, decisions, step=None, step_index=-1)
         await self._flush_hitl_memories(state)
@@ -1440,6 +1642,7 @@ class AgentHarness:
             )
 
         builder = context_builder or self.context_builder
+        execute_agent, dispatch_mode = self._agent_for_step(step)
         user_message = builder.build_step_message(
             task_query,
             state,
@@ -1450,6 +1653,7 @@ class AgentHarness:
             enforce_binding=self.harness_config.enforce_subagent_binding,
             use_evidence_digest=self.harness_config.synthesis_use_evidence_digest,
             extra_instruction=extra_instruction,
+            dispatch_mode=dispatch_mode,
         )
         step_ctx_metrics = builder.last_step_metrics
         if step_ctx_metrics is not None:
@@ -1485,46 +1689,46 @@ class AgentHarness:
         tools_invoked: list[str] = []
         step_assistants: list[str] = []
 
-        async for chunk in self.agent.astream(
+        async for chunk in execute_agent.astream(
             {"messages": [{"role": "user", "content": user_message}]},
             config=config,
         ):
-            for node_name, node_state in chunk.items():
+            for _node_name, node_state in chunk.items():
                 if not node_state or "messages" not in node_state:
                     continue
                 messages = node_state["messages"]
                 if not messages or not isinstance(messages, list):
                     continue
                 last_msg = messages[-1]
-                if node_name == "model":
-                    if getattr(last_msg, "tool_calls", None):
-                        tool_calls += len(last_msg.tool_calls)
-                        for tool_call in last_msg.tool_calls:
-                            tool_name = tool_call["name"]
-                            tools_invoked.append(tool_name)
-                            if tool_name == "task":
-                                subagent = tool_call["args"].get("subagent_type", "")
-                                if subagent and subagent not in step_assistants:
-                                    step_assistants.append(subagent)
-                                if subagent and subagent not in state.assistants_called:
-                                    state.assistants_called.append(subagent)
-                                monitor.report_assistant(
-                                    subagent,
-                                    {"description": tool_call["args"].get("description")},
-                                )
-                            else:
-                                monitor.report_tool(
-                                    tool_name,
-                                    tool_call.get("args", {}),
-                                )
-                    elif getattr(last_msg, "content", None):
-                        content = last_msg.content
-                        if isinstance(content, str):
-                            final_content = content
+                if getattr(last_msg, "tool_calls", None):
+                    tool_calls += len(last_msg.tool_calls)
+                    for tool_call in last_msg.tool_calls:
+                        tool_name = tool_call["name"]
+                        tools_invoked.append(tool_name)
+                        monitor.report_tool(
+                            tool_name,
+                            tool_call.get("args", {}),
+                        )
+                elif getattr(last_msg, "content", None):
+                    content = last_msg.content
+                    if isinstance(content, str):
+                        final_content = content
 
-        await self._hygiene_checkpoint_messages(config, state)
-        await self._await_hitl_interrupt_resumes(config, state, step_index)
-        snapshot = await self.agent.aget_state(config)
+        if dispatch_mode == "direct" and step.subagent:
+            if step.subagent not in step_assistants:
+                step_assistants.append(step.subagent)
+            if step.subagent not in state.assistants_called:
+                state.assistants_called.append(step.subagent)
+            monitor.report_assistant(
+                step.subagent,
+                {"dispatch": "direct", "step_type": step.step_type},
+            )
+
+        await self._hygiene_checkpoint_messages(config, state, agent=execute_agent)
+        await self._await_hitl_interrupt_resumes(
+            config, state, step_index, agent=execute_agent
+        )
+        snapshot = await execute_agent.aget_state(config)
         if snapshot is not None:
             extracted = self._extract_final_content_from_snapshot(snapshot)
             if extracted:
@@ -1549,6 +1753,7 @@ class AgentHarness:
                 "duration_ms": duration,
                 "tools_invoked": tools_invoked,
                 "step_assistants_called": step_assistants,
+                "worker_dispatch": dispatch_mode,
             },
         )
 
@@ -1602,6 +1807,14 @@ class AgentHarness:
             step_index=step_index,
             gate_type="step",
         )
+        await self._persist_hitl_waiting(
+            state,
+            {
+                "gate_type": "step",
+                "step_index": step_index,
+                "payload": payload,
+            },
+        )
         try:
             decisions = await hitl_coordinator.wait_for_decisions(
                 state.session_id,
@@ -1610,6 +1823,8 @@ class AgentHarness:
             )
         except TimeoutError:
             return False
+        finally:
+            await self._clear_hitl_waiting(state)
 
         if any(decision.get("type") == "reject" for decision in decisions):
             approved = False
@@ -1633,20 +1848,31 @@ class AgentHarness:
         config: dict[str, Any],
         state: LoopState,
         step_index: int,
+        *,
+        agent: Any = None,
     ) -> None:
         if not self.harness_config.hitl_enabled:
             return
 
         from langgraph.types import Command
 
+        target = agent if agent is not None else self.agent
+
         while True:
-            snapshot = await self.agent.aget_state(config)
+            snapshot = await target.aget_state(config)
             payload = self._extract_interrupt_payload(snapshot)
             if not payload:
                 break
 
             action_requests = payload.get("action_requests", [])
             review_configs = payload.get("review_configs", [])
+            waiter_payload = {
+                "action_requests": action_requests,
+                "review_configs": review_configs,
+                "step_index": step_index,
+                "gate_type": "interrupt_on",
+                "editable": self.harness_config.hitl_allow_edit,
+            }
             monitor.report_hitl_interrupt(
                 state.session_id,
                 action_requests,
@@ -1662,22 +1888,29 @@ class AgentHarness:
                 gate_type="interrupt_on",
                 action_count=len(action_requests),
             )
-            decisions = await hitl_coordinator.wait_for_decisions(
-                state.session_id,
+            await self._persist_hitl_waiting(
+                state,
                 {
-                    "action_requests": action_requests,
-                    "review_configs": review_configs,
-                    "step_index": step_index,
                     "gate_type": "interrupt_on",
-                    "editable": self.harness_config.hitl_allow_edit,
+                    "step_index": step_index,
+                    "payload": waiter_payload,
                 },
-                timeout_sec=self.harness_config.hitl_timeout_sec,
             )
+            try:
+                decisions = await hitl_coordinator.wait_for_decisions(
+                    state.session_id,
+                    waiter_payload,
+                    timeout_sec=self.harness_config.hitl_timeout_sec,
+                )
+            finally:
+                await self._clear_hitl_waiting(state)
             if any(d.get("type") == "edit" for d in decisions):
                 state = self._apply_hitl_decisions(state, decisions, None, step_index)
                 await self._flush_hitl_memories(state)
-            await self._hygiene_checkpoint_messages(config, state, snapshot)
-            await self.agent.ainvoke(
+            await self._hygiene_checkpoint_messages(
+                config, state, snapshot, agent=target
+            )
+            await target.ainvoke(
                 Command(resume={"decisions": decisions}),
                 config=config,
             )

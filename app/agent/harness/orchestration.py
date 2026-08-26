@@ -344,8 +344,10 @@ class StepCheckpointStore:
         assistants_called: list[str],
         completed_keys: list[str],
         plan_summary: str = "",
+        loop_state: dict[str, Any] | None = None,
+        citation_snapshot: dict[str, Any] | None = None,
     ) -> None:
-        payload = {
+        payload: dict[str, Any] = {
             "session_id": session_id,
             "task_fingerprint": task_fingerprint,
             "next_step_index": next_step_index,
@@ -361,7 +363,12 @@ class StepCheckpointStore:
                 }
                 for r in step_results
             ],
+            "authority": "loop_state",
         }
+        if loop_state is not None:
+            payload["loop_state"] = loop_state
+        if citation_snapshot is not None:
+            payload["citation_snapshot"] = citation_snapshot
         self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def load(self) -> Optional[dict[str, Any]]:

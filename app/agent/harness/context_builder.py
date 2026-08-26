@@ -275,10 +275,19 @@ class ContextBuilder:
         step: PlanStep,
         *,
         enforce: bool = True,
+        dispatch_mode: str = "main",
     ) -> str:
-        """【Phase 7】计划绑定：本步只允许指定子 Agent。"""
+        """【Phase 7 / 20】计划绑定：直调工人或（回退）要求 task 委派。"""
         if not enforce or not step.subagent:
             return ""
+        if dispatch_mode == "direct":
+            return f"""
+    【Harness 直调工人 — 强制】
+    - 运行时已把本步交给你（{step.subagent}），直接使用已绑定工具
+    - 不要寻找其他助手，也不要调用 task
+    - 禁止调用 generate_markdown / convert_md_to_pdf（属于后续步骤）
+    - 完成后按【工人结构化回传】返回 JSON
+    """
         return f"""
     【Harness 计划绑定 — 强制】
     - 本步唯一允许的子 Agent：{step.subagent}
@@ -287,8 +296,22 @@ class ContextBuilder:
     - 完成后按【工人结构化回传】返回 JSON
     """
 
-    def build_step_instruction(self, step: PlanStep, step_index: int, total_steps: int) -> str:
-        agent_hint = f"请调用 {step.subagent}。" if step.subagent else "请使用当前步骤允许的 MCP 工具。"
+    def build_step_instruction(
+        self,
+        step: PlanStep,
+        step_index: int,
+        total_steps: int,
+        *,
+        dispatch_mode: str = "main",
+    ) -> str:
+        if dispatch_mode == "direct" and step.subagent:
+            agent_hint = f"你就是 {step.subagent}，直接使用已绑定工具完成本步。"
+        else:
+            agent_hint = (
+                f"请调用 {step.subagent}。"
+                if step.subagent
+                else "请使用当前步骤允许的 MCP 工具。"
+            )
         parallel_note = ""
         if step.metadata.get("parallel_size", 0) >= 2:
             parallel_note = (
@@ -328,6 +351,7 @@ class ContextBuilder:
         enforce_binding: bool = True,
         use_evidence_digest: bool = True,
         extra_instruction: str = "",
+        dispatch_mode: str = "main",
     ) -> str:
         self._last_used_digest = False
         self._last_truncated_prior = 0
@@ -351,8 +375,12 @@ class ContextBuilder:
                 current_step_type=step.step_type,
                 use_evidence_digest=use_evidence_digest,
             ),
-            "step": self.build_step_instruction(step, step_index, total),
-            "binding": self.build_subagent_binding_instruction(step, enforce=enforce_binding),
+            "step": self.build_step_instruction(
+                step, step_index, total, dispatch_mode=dispatch_mode
+            ),
+            "binding": self.build_subagent_binding_instruction(
+                step, enforce=enforce_binding, dispatch_mode=dispatch_mode
+            ),
             "worker_json": build_worker_output_instruction(step),
             "tools": self.build_tool_context(step.step_type),
             "resources": self._build_resources_layer(relative_session_dir),

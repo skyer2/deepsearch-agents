@@ -108,6 +108,8 @@ def test_harness_config_orchestration():
     assert cfg.max_parallel_workers >= 1
     assert cfg.step_timeout_sec >= 10
     assert cfg.enforce_subagent_binding is True
+    assert cfg.direct_worker_invoke is True
+    assert cfg.persist_loop_state is True
     print("[OK] orchestration config loaded")
 
 

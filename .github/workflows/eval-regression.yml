@@ -46,6 +46,12 @@ jobs:
       - name: Phase 19 context hygiene tests
         run: uv run python tests/test_harness_phase19_context.py
 
+      - name: Phase 20 worker dispatch + LoopState persist tests
+        run: uv run python tests/test_harness_phase20_runtime.py
+
+      - name: Phase 7 orchestration tests
+        run: uv run python tests/test_harness_orchestration.py
+
       - name: Phase 12 memory tests
         run: uv run python tests/test_harness_phase12_memory.py
 

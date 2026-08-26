@@ -116,6 +116,33 @@ class PlanStep:
     description: str
     subagent: Optional[str] = None
     metadata: dict[str, Any] = field(default_factory=dict)  # 【Phase 6】HITL edit / replan 元数据
+    task_id: str = ""
+    depends_on: list[str] = field(default_factory=list)
+
+    def resolved_task_id(self, index: int) -> str:
+        return self.task_id or f"t{index}:{self.step_type}"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "step_type": self.step_type,
+            "description": self.description,
+            "subagent": self.subagent,
+            "metadata": dict(self.metadata or {}),
+            "task_id": self.task_id,
+            "depends_on": list(self.depends_on or []),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "PlanStep":
+        row = data or {}
+        return cls(
+            step_type=str(row.get("step_type", "")),
+            description=str(row.get("description", "")),
+            subagent=row.get("subagent"),
+            metadata=dict(row.get("metadata") or {}),
+            task_id=str(row.get("task_id") or ""),
+            depends_on=[str(x) for x in (row.get("depends_on") or [])],
+        )
 
 
 @dataclass
@@ -124,6 +151,23 @@ class ExecutionPlan:
 
     steps: list[PlanStep] = field(default_factory=list)
     summary: str = ""
+    plan_version: int = 1
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "summary": self.summary,
+            "steps": [step.to_dict() for step in self.steps],
+            "plan_version": int(self.plan_version or 1),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "ExecutionPlan":
+        row = data or {}
+        return cls(
+            summary=str(row.get("summary", "")),
+            steps=[PlanStep.from_dict(item) for item in (row.get("steps") or [])],
+            plan_version=int(row.get("plan_version") or 1),
+        )
 
 
 @dataclass

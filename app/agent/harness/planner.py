@@ -447,10 +447,9 @@ def finalize_plan(plan: ExecutionPlan) -> ExecutionPlan:
     """计划生成后标记并行组与初始状态。"""
 
     from app.agent.harness.orchestration import mark_parallel_retrieval_groups
+    from app.research.runtime.scheduler import annotate_plan_tasks
 
-
-
-    plan = mark_parallel_retrieval_groups(plan)
+    plan = annotate_plan_tasks(mark_parallel_retrieval_groups(plan))
 
     for step in plan.steps:
 

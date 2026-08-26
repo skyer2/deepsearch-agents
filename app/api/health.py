@@ -158,6 +158,9 @@ async def collect_health() -> dict[str, Any]:
                 "step_checkpoint_enabled": config.step_checkpoint_enabled,
                 "structured_output_retry": config.structured_output_retry,
                 "synthesis_use_evidence_digest": config.synthesis_use_evidence_digest,
+                "direct_worker_invoke": getattr(config, "direct_worker_invoke", True),
+                "persist_loop_state": getattr(config, "persist_loop_state", True),
+                "graph_runtime_enabled": getattr(config, "graph_runtime_enabled", False),
             },
             "planner": {
                 "llm_enabled": config.planner_llm_enabled,

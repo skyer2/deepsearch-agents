@@ -143,6 +143,9 @@ class HarnessConfig:
     structured_output_retry: bool = True
     require_structured_worker_output: bool = True
     synthesis_use_evidence_digest: bool = True
+    direct_worker_invoke: bool = True
+    persist_loop_state: bool = True
+    graph_runtime_enabled: bool = False
 
     planner_llm_confirm_enabled: bool = False
     planner_llm_confirm_min_confidence: float = 0.5
@@ -524,6 +527,18 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
         synthesis_use_evidence_digest=_env_bool(
             "HARNESS_SYNTHESIS_EVIDENCE_DIGEST",
             bool(orch.get("synthesis_use_evidence_digest", True)),
+        ),
+        direct_worker_invoke=_env_bool(
+            "HARNESS_DIRECT_WORKER_INVOKE",
+            bool(orch.get("direct_worker_invoke", True)),
+        ),
+        persist_loop_state=_env_bool(
+            "HARNESS_PERSIST_LOOP_STATE",
+            bool(orch.get("persist_loop_state", True)),
+        ),
+        graph_runtime_enabled=_env_bool(
+            "HARNESS_GRAPH_RUNTIME",
+            bool(orch.get("graph_runtime_enabled", False)),
         ),
         planner_llm_confirm_enabled=_env_bool(
             "HARNESS_PLANNER_LLM_CONFIRM",

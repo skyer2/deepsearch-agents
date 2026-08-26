@@ -42,9 +42,12 @@ After:  Deep Research 场景下的 Agent Harness 工程实践 — 可见、可�
 ### 1.3 非目标（控制范围）
 
 - 不做完整多租户 SaaS 平台
-- 不替换 DeepAgents/LangGraph 运行时
+- 不替换 DeepAgents/LangGraph **作为单步发动机**
+- 不把 DeepAgents 主图当作第二套编排器（Phase 20：检索步直调工人）
 - 不自研 LLM 或搜索引擎
 - 不做 Coding Agent 赛道
+
+运行时收口说明见 [HARNESS_ARCHITECTURE.md](./HARNESS_ARCHITECTURE.md)。
 
 ---
 
@@ -82,8 +85,10 @@ After:  Deep Research 场景下的 Agent Harness 工程实践 — 可见、可�
       → [understand] 解析意图
       → [plan] 生成结构化计划
       → [build_context] 组装 4 层上下文 + 召回长期记忆
-      → [execute] 逐步执行（内层 DeepAgents ReAct Loop）
-          → MCP Registry 发现和调用工具
+      → [execute] 逐步执行
+          → 检索步：直调工人图（不经主 Agent task）
+          → 写文件步：主图 + interrupt_on
+          → LoopState 落盘 checkpoint.json
           → 子 Agent 返回后 → [compress] 压缩结果
       → [validate] 校验当前 step
           → 失败 → [recover] 结构化重试
