@@ -1,9 +1,11 @@
 """
-【Phase 18】记忆巩固 — ADD / UPDATE / SUPERSEDE / DELETE / NOOP + 衰减 + 晋升。
+【Phase 18/24】记忆巩固 — ADD / UPDATE / SUPERSEDE / DELETE / NOOP + 衰减 + 确认晋升。
 
-对齐 Mem0 的写入动作语义，但面向深度研搜做了两处特化：
-1. SUPERSEDE 保留旧记录（软删 + 取代链），以便审计「结论何时被推翻」
-2. 低信任记忆不会被晋升；用户/HITL 写入默认 TRUSTED，可覆盖同主题低信任 fact
+参考过经典 Memory consolidation 的 ADD/UPDATE/DELETE 思路，但 Deep Research
+需要审计历史，所以扩展了 SUPERSEDE。Mem0 最新实现已演进为 ADD-only extraction；
+SUPERSEDE 是本仓的 domain decision，不是「对齐 Mem0 最新算法」。
+
+Trust 晋升只接受独立证据或人工确认，recall_count 只用于 utility/衰减，不作为 truth。
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from app.agent.memory.governance import find_merge_candidate, looks_contradictor
 from app.agent.memory.models import MemoryRecord, MemoryWriteRequest, WriteSource
 from app.agent.memory.policy import MemoryPolicy
 from app.agent.memory.provenance import TrustTier, coerce_trust_tier
+from app.agent.memory.validity import extract_fact_frame
 
 
 class ConsolidationAction(str, Enum):
@@ -59,6 +62,13 @@ def decide_write_action(
         return ConsolidationDecision(action=ConsolidationAction.ADD, reason="no_similar")
 
     if write.fact.strip() == candidate.fact.strip():
+        source = write.write_source.value if isinstance(write.write_source, WriteSource) else str(write.write_source)
+        if source == WriteSource.CONFIRMATION.value:
+            return ConsolidationDecision(
+                action=ConsolidationAction.UPDATE,
+                target=candidate,
+                reason="independent_confirmation",
+            )
         return ConsolidationDecision(
             action=ConsolidationAction.NOOP,
             target=candidate,
@@ -74,12 +84,18 @@ def decide_write_action(
             reason="lower_trust_cannot_overwrite",
         )
 
-    if looks_contradictory(write.fact, candidate.fact):
+    frame_a = extract_fact_frame(write.fact)
+    frame_b = extract_fact_frame(candidate.fact)
+    write_valid = (write.valid_time or frame_a.valid_time).strip()
+    exist_valid = (candidate.valid_time or frame_b.valid_time).strip()
+    if looks_contradictory(write.fact, candidate.fact, frame_a=frame_a, frame_b=frame_b):
         return ConsolidationDecision(
             action=ConsolidationAction.SUPERSEDE,
             target=candidate,
             reason="contradiction",
         )
+    if write_valid and exist_valid and write_valid != exist_valid:
+        return ConsolidationDecision(action=ConsolidationAction.ADD, reason="different_valid_time")
     return ConsolidationDecision(
         action=ConsolidationAction.UPDATE,
         target=candidate,
@@ -93,14 +109,66 @@ def _TRUST_RANK(tier: TrustTier) -> int:
 
 def apply_update(existing: MemoryRecord, write: MemoryWriteRequest) -> MemoryRecord:
     merged = merge_record(existing, write)
-    merged.trust_tier = write.resolved_trust_tier()
-    merged.provenance = write.resolved_provenance() or merged.provenance
+    source = write.write_source.value if isinstance(write.write_source, WriteSource) else str(write.write_source)
+    if source != WriteSource.CONFIRMATION.value:
+        merged.trust_tier = write.resolved_trust_tier()
+        merged.provenance = write.resolved_provenance() or merged.provenance
     if write.project_id:
         merged.project_id = write.project_id
     if write.dedup_key:
         merged.dedup_key = write.dedup_key
+    merge_independent_confirmation(merged, write)
+    apply_validity_fields(merged, write)
+    if write.human_confirmed:
+        merged.human_confirmed = True
+        merged.trust_tier = TrustTier.TRUSTED
     merged.metadata = {**merged.metadata, "consolidated": ConsolidationAction.UPDATE.value}
     return merged
+
+
+def _source_ids_from_write(write: MemoryWriteRequest) -> list[str]:
+    prov = write.resolved_provenance()
+    ids: list[str] = []
+    ids.extend(prov.source_urls)
+    ids.extend(prov.evidence_ids)
+    locator = prov.primary_locator()
+    if locator:
+        ids.append(locator)
+    return [item for item in ids if item]
+
+
+def merge_independent_confirmation(record: MemoryRecord, write: MemoryWriteRequest) -> None:
+    """新来源独立确认：加入 confirmed_by_source_ids，不把 recall 当证明。"""
+    incoming = _source_ids_from_write(write)
+    known = list(record.confirmed_by_source_ids)
+    if record.provenance.primary_locator() and record.provenance.primary_locator() not in known:
+        known.append(record.provenance.primary_locator())
+    for sid in incoming:
+        if sid not in known:
+            known.append(sid)
+    record.confirmed_by_source_ids = known
+    record.confirmation_count = len(known)
+    if write.last_verified_at:
+        record.last_verified_at = write.last_verified_at
+    elif incoming:
+        from datetime import datetime, timezone
+
+        record.last_verified_at = datetime.now(timezone.utc).isoformat()
+
+
+def apply_validity_fields(record: MemoryRecord, write: MemoryWriteRequest) -> None:
+    frame = extract_fact_frame(write.fact)
+    record.as_of = write.as_of or record.as_of or record.created_at
+    record.valid_from = write.valid_from or record.valid_from
+    record.valid_to = write.valid_to or record.valid_to
+    record.valid_time = write.valid_time or frame.valid_time or record.valid_time
+    record.observed_at = write.observed_at or record.observed_at or record.created_at
+    record.source_updated_at = write.source_updated_at or record.source_updated_at
+    record.entity = write.entity or frame.entity or record.entity
+    record.attribute = write.attribute or frame.attribute or record.attribute
+    record.value_text = write.value_text or frame.value or record.value_text
+    if write.idempotency_key:
+        record.idempotency_key = write.idempotency_key
 
 
 def decay_confidence(record: MemoryRecord, *, half_life_days: int, floor: float) -> float:
@@ -109,23 +177,37 @@ def decay_confidence(record: MemoryRecord, *, half_life_days: int, floor: float)
     age = record.age_days()
     if age <= 0:
         return record.confidence
-    # 每过一个半衰期打五折，但不低于 floor；被 recall 过的记忆衰减更慢
     halves = age / float(half_life_days)
+    # recall_count 只作 popularity/utility，减缓衰减，不提高 trust
     recalled_boost = min(1.0, 0.15 * record.recall_count)
     decayed = record.confidence * (0.5 ** halves) * (1.0 + recalled_boost)
     return max(floor, min(1.0, decayed))
 
 
-def should_promote(record: MemoryRecord, *, min_sessions: int) -> bool:
-    """跨 session 多次命中且本身已是 derived → 晋升 trusted。"""
+def independent_source_count(record: MemoryRecord) -> int:
+    sources = {str(s) for s in (record.confirmed_by_source_ids or []) if s}
+    locator = record.provenance.primary_locator() if record.provenance else ""
+    if locator:
+        sources.add(locator)
+    for url in record.provenance.source_urls if record.provenance else []:
+        if url:
+            sources.add(url)
+    for eid in record.provenance.evidence_ids if record.provenance else []:
+        if eid:
+            sources.add(eid)
+    return len(sources)
+
+
+def should_promote(record: MemoryRecord, *, min_sessions: int = 2, min_confirmations: int | None = None) -> bool:
+    """独立证据或人工确认才可晋升 trusted。recall_count / 跨 session 看见 ≠ 被证明。"""
     if coerce_trust_tier(record.trust_tier) != TrustTier.DERIVED:
         return False
     if record.write_source in {WriteSource.USER_EXPLICIT, WriteSource.HITL, WriteSource.SEED}:
         return False
-    sessions = record.metadata.get("seen_sessions") or []
-    if isinstance(sessions, list) and len({str(s) for s in sessions}) >= min_sessions:
+    if record.human_confirmed:
         return True
-    return record.recall_count >= max(3, min_sessions + 1)
+    needed = min_confirmations if min_confirmations is not None else max(2, min_sessions)
+    return independent_source_count(record) >= needed
 
 
 def should_purge(record: MemoryRecord, *, purge_after_days: int) -> bool:

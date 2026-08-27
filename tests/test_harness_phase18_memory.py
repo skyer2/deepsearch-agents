@@ -31,7 +31,7 @@ from app.agent.memory.provenance import (
     TrustTier,
     classify_trust_tier,
     is_recall_eligible,
-    source_dedup_key,
+    source_ledger_id,
 )
 from app.agent.memory.store import MemoryStore
 from app.config.loader import reload_harness_config
@@ -45,6 +45,9 @@ def _policy(**kwargs) -> MemoryPolicy:
         max_facts_per_remember=5,
         embedding_enabled=False,
         require_provenance_for_step_write=True,
+        utility_gate_enabled=False,
+        step_incremental_write_longterm=True,
+        require_explicit_identity=False,
         source_ledger_enabled=True,
         consolidation_enabled=True,
         project_scope_enabled=True,
@@ -185,10 +188,18 @@ async def _run():
             source_kind="url",
             quality="mixed",
         )
+        from app.agent.memory.provenance import normalize_source_url
+
         assert recorded >= 1
         ledger = store.list_sources(identity=alice)
         assert ledger
-        assert ledger[0].id == source_dedup_key("https://example.com/report")
+        assert normalize_source_url(ledger[0].locator) == normalize_source_url("https://example.com/report")
+        assert ledger[0].id == source_ledger_id(
+            tenant_id=alice.tenant_id,
+            user_id=alice.user_id,
+            project_id=alice.project_id,
+            locator="https://example.com/report",
+        )
         print("[OK] source ledger dedup")
 
         await store.remember_writes(
@@ -253,8 +264,11 @@ async def _run():
     cfg = reload_harness_config()
     assert cfg.memory_source_ledger_enabled is True
     assert cfg.memory_synthesis_min_trust == "derived"
+    assert cfg.memory_min_recall_trust == "derived"
+    assert cfg.memory_require_explicit_identity is True
+    assert cfg.memory_step_incremental_write_longterm is False
     assert cfg.memory_consolidation_enabled is True
-    print("[OK] harness.yml phase18 keys")
+    print("[OK] harness.yml phase18/24 keys")
 
     assert classify_trust_tier(write_source=WriteSource.USER_EXPLICIT) == TrustTier.TRUSTED
     assert classify_trust_tier(

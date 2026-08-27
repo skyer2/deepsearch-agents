@@ -15,6 +15,9 @@ _PII_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("email", re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")),
     ("phone_cn", re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")),
     ("id_card_cn", re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)")),
+    ("bank_card", re.compile(r"(?<!\d)(?:\d[ -]?){15,18}\d(?!\d)")),
+    ("api_key", re.compile(r"(?i)\b(?:sk|pk|api[_-]?key|token)[-_]?[A-Za-z0-9]{16,}\b")),
+    ("bearer_token", re.compile(r"(?i)\bBearer\s+[A-Za-z0-9\-._~+/]+=*")),
 ]
 
 

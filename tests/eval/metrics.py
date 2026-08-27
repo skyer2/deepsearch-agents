@@ -286,6 +286,7 @@ def evaluate_artifacts(expected_artifacts: list[str], artifacts: list[str]) -> b
 
 
 def evaluate_memory_recall(expected: bool, recalled: bool, recall_at_k: float | None = None) -> bool:
+    """任务是否召回了记忆。recall_at_k 参数实际是 mean_recall_score，不是 IR Recall@K。"""
     if not expected:
         return True
     if recalled:

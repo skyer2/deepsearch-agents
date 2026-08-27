@@ -1718,7 +1718,7 @@ class AgentHarness:
             project_id=identity.project_id,
             provenance=provenance,
         )
-        if writes:
+        if writes and getattr(policy, "step_incremental_write_longterm", False):
             saved = await self.memory.remember_writes(
                 writes,
                 user_id=identity.user_id,
@@ -1734,6 +1734,15 @@ class AgentHarness:
                     step_type=step.step_type,
                     trust_tier=writes[0].resolved_trust_tier().value,
                 )
+        elif writes:
+            monitor.report_phase(
+                "memory",
+                "step_incremental_deferred",
+                session_id=state.session_id,
+                count=len(writes),
+                step_type=step.step_type,
+                reason="source_ledger_only",
+            )
         if provenance.source_urls:
             recorded = await self.memory.record_sources(
                 provenance.source_urls,
@@ -1764,7 +1773,7 @@ class AgentHarness:
         state.memory_facts = [r.fact for r in recalled if r.fact]
         state.memory_recalled = bool(state.memory_facts)
         state.obs_memory_recalled_count = len(state.memory_facts)
-        state.obs_memory_recall_at_k = recalled_result.recall_at_k
+        state.obs_memory_recall_at_k = recalled_result.mean_recall_score
         state.obs_memory_embedding_used = recalled_result.embedding_used
         state.obs_memory_trust_filtered = recalled_result.trust_filtered
         state.memory_source_ledger = self.memory.list_sources(identity=identity)
@@ -2358,7 +2367,15 @@ class AgentHarness:
 
         if policy.consolidation_enabled:
             try:
-                if policy.consolidation_async:
+                if getattr(policy, "consolidation_durable", True):
+                    self.memory.enqueue_consolidation(
+                        user_id=identity.user_id, identity=identity
+                    )
+                    if policy.consolidation_async:
+                        asyncio.create_task(self.memory.drain_jobs())
+                    else:
+                        await self.memory.drain_jobs()
+                elif policy.consolidation_async:
                     asyncio.create_task(
                         self.memory.consolidate(user_id=identity.user_id, identity=identity)
                     )
@@ -2422,6 +2439,7 @@ class AgentHarness:
                 "memory_project_id": state.memory_project_id,
                 "memory_identity_ephemeral": state.memory_identity_ephemeral,
                 "memory_recalled_count": getattr(state, "obs_memory_recalled_count", 0),
+                "memory_mean_recall_score": getattr(state, "obs_memory_recall_at_k", 0.0),
                 "memory_recall_at_k": getattr(state, "obs_memory_recall_at_k", 0.0),
                 "memory_embedding_used": getattr(state, "obs_memory_embedding_used", False),
                 "memory_trust_filtered": getattr(state, "obs_memory_trust_filtered", 0),

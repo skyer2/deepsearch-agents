@@ -175,12 +175,29 @@ def normalize_source_url(raw: str) -> str:
 
 
 def source_dedup_key(locator: str, *, kind: str = "url") -> str:
-    """来源台账去重键：同一 URL 在同项目下只记一条。"""
+    """来源台账 locator 去重键（不含租户，需与 source_ledger_id 组合使用）。"""
     normalized = normalize_source_url(locator) if kind == "url" else (locator or "").strip()
     if not normalized:
         return ""
     digest = hashlib.sha1(f"{kind}:{normalized}".encode("utf-8")).hexdigest()[:20]
     return f"src_{digest}"
+
+
+def source_ledger_id(
+    *,
+    tenant_id: str,
+    user_id: str,
+    project_id: str,
+    locator: str,
+    kind: str = "url",
+) -> str:
+    """租户/用户/项目作用域下的来源台账主键，避免跨租户 URL 碰撞。"""
+    loc_key = source_dedup_key(locator, kind=kind)
+    if not loc_key:
+        return ""
+    material = f"{tenant_id}:{user_id}:{project_id}:{loc_key}"
+    digest = hashlib.sha1(material.encode("utf-8")).hexdigest()[:20]
+    return f"led_{digest}"
 
 
 def extract_urls(text: str, limit: int = 5) -> list[str]:

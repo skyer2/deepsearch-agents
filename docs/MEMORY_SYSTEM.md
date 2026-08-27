@@ -63,12 +63,12 @@ POST /api/task  (query, thread_id, user_id, tenant_id, project_id)
         ├─ 若是写报告步：二次 recall（只接受 derived+）
         ├─ EXECUTE 子 Agent
         ├─ COMPRESS + 注册 Citation
-        ├─ 检索步成功：有出处才 remember；URL 写入 source_ledger
+        ├─ 检索步成功：默认只写 Source Ledger / Evidence，不进长期 Memory
         └─ HITL reject/edit：沉淀 procedural
         │
- FINALIZE  ── 从最终报告抽 curated findings ── ADD/UPDATE/SUPERSEDE
+ FINALIZE  ── Memory Candidate + Utility/Provenance/Freshness Gate ── ADD/UPDATE/SUPERSEDE
         │
-        └─ 异步 consolidation：衰减 / 晋升 / 硬清理
+        └─ durable job 入队 → drain consolidation：衰减 / 独立确认晋升 / 硬清理
 ```
 
 ---
@@ -94,7 +94,7 @@ POST /api/task  (query, thread_id, user_id, tenant_id, project_id)
 
 FastAPI `POST /api/task` 把 `user_id / tenant_id / project_id` 传进 `run_deep_agent` → `AgentHarness.run` 里 `set_memory_identity`，`finally` 里 `reset`。这样单进程多用户不会再共享同一个 `HARNESS_MEMORY_USER_ID`。
 
-生产建议：`HARNESS_MEMORY_REQUIRE_IDENTITY=true`，拒绝匿名（ephemeral）写入。Demo 默认允许 session 退化，方便本地跑。
+生产默认：`require_explicit_identity=true`，拒绝匿名（ephemeral）写入。本地单测可在 `MemoryPolicy` 里关闭。不要把 `HARNESS_MEMORY_USER_ID` 当多用户方案。
 
 ---
 
@@ -237,7 +237,7 @@ score = (kw_weight * 关键词 + emb_weight * cosine)
 
 无 embedding 时关键词权重拉满。完全无命中则冷启动返回最近记录。
 
-召回后会 `mark_recalled`（`recall_count+1`，记下 `seen_sessions`），供以后晋升使用。
+召回后会 `mark_recalled`（`recall_count+1`，记下 `seen_sessions`）。`recall_count` 只用于 utility/衰减，**不能**把记忆晋升为 trusted。
 
 ### 6.3 Prompt 里长什么样
 
@@ -294,7 +294,7 @@ SQLite 要点：embedding **在事务外** await；审计日志与写入 **共�
 
 ### 7.4 配置（`harness.yml` memory 段）
 
-常用开关：`enabled`、`provider`、`recall_top_k`、`ttl_days`、`wrap_untrusted`、`embedding_enabled`、`step_incremental_enabled`、`remember_on_partial`、`require_explicit_identity`、`synthesis_min_trust`、`require_provenance_for_step_write`、`source_ledger_enabled`、`step_recall_enabled`、`consolidation_*`。
+常用开关：`enabled`、`provider`、`recall_top_k`、`ttl_days`/`ttl_by_type`、`wrap_untrusted`、`embedding_enabled`、`step_incremental_enabled`、`step_incremental_write_longterm`、`remember_on_partial`、`require_explicit_identity`、`min_recall_trust`、`synthesis_min_trust`、`utility_gate_enabled`、`require_provenance_for_step_write`、`source_ledger_enabled`、`step_recall_enabled`、`consolidation_*`。
 
 ---
 

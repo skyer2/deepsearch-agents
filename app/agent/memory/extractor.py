@@ -10,14 +10,17 @@ from typing import Any, Optional
 from app.agent.memory.models import MemoryType, MemoryWriteRequest, WriteSource
 from app.agent.memory.provenance import Provenance, TrustTier, classify_trust_tier
 
-EXTRACT_PROMPT = """从以下 Agent 任务结果中提取 3-5 条可长期保存的关键事实。
+EXTRACT_PROMPT = """从以下 Agent 任务结果中提取少量可长期复用的记忆，而不是所有信息。
+只保留以后做同类研究时真正值得复用的内容。
+优先：用户偏好、明确反馈、程序性知识、经过验证的可复用结论。
+不要：网页全文、一次性搜索结果、无出处事实、失败检索、未验证推断。
 要求：
 1. 每条事实独立、具体、可复用
-2. 不要泛泛而谈，保留主题、结论、数据要点
+2. 不要泛泛而谈，保留主题、结论、数据要点和年份（valid time）
 3. 每行格式：类型|事实内容
    类型只能是：semantic / episodic / preference / procedural
 4. 不要编号
-5. 不要把网页原文整段复制；只保留可验证的结论
+5. 不要把网页原文整段复制
 
 任务结果：
 {content}

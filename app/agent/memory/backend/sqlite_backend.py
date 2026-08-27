@@ -19,11 +19,13 @@ from app.agent.memory.consolidation import (
     ConsolidationAction,
     ConsolidationReport,
     apply_update,
+    apply_validity_fields,
     decay_confidence,
     decide_write_action,
     should_promote,
     should_purge,
 )
+from app.agent.memory.jobs import MemoryJob, consolidation_job
 from app.agent.memory.models import (
     MemoryRecord,
     MemoryType,
@@ -37,6 +39,7 @@ from app.agent.memory.provenance import Provenance, TrustTier, coerce_trust_tier
 from app.agent.memory.recall.embedding import embed_text
 from app.agent.memory.recall.hybrid import hybrid_recall
 from app.agent.memory.security import MemoryAuditLog, contains_pii, redact_pii
+from app.agent.memory.validity import extract_fact_frame, record_is_expired
 
 _NEW_COLUMNS: list[tuple[str, str]] = [
     ("project_id", "TEXT NOT NULL DEFAULT 'default'"),
@@ -47,6 +50,26 @@ _NEW_COLUMNS: list[tuple[str, str]] = [
     ("superseded_by", "TEXT NOT NULL DEFAULT ''"),
     ("recall_count", "INTEGER NOT NULL DEFAULT 0"),
     ("last_recalled_at", "TEXT NOT NULL DEFAULT ''"),
+    ("as_of", "TEXT NOT NULL DEFAULT ''"),
+    ("valid_from", "TEXT NOT NULL DEFAULT ''"),
+    ("valid_to", "TEXT NOT NULL DEFAULT ''"),
+    ("last_verified_at", "TEXT NOT NULL DEFAULT ''"),
+    ("observed_at", "TEXT NOT NULL DEFAULT ''"),
+    ("source_updated_at", "TEXT NOT NULL DEFAULT ''"),
+    ("confirmed_by_source_ids", "TEXT"),
+    ("confirmation_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("human_confirmed", "INTEGER NOT NULL DEFAULT 0"),
+    ("idempotency_key", "TEXT NOT NULL DEFAULT ''"),
+    ("entity", "TEXT NOT NULL DEFAULT ''"),
+    ("attribute", "TEXT NOT NULL DEFAULT ''"),
+    ("value_text", "TEXT NOT NULL DEFAULT ''"),
+    ("valid_time", "TEXT NOT NULL DEFAULT ''"),
+]
+
+_LEDGER_COLUMNS: list[tuple[str, str]] = [
+    ("last_checked_at", "TEXT NOT NULL DEFAULT ''"),
+    ("content_fingerprint", "TEXT NOT NULL DEFAULT ''"),
+    ("query_purpose", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 
@@ -61,6 +84,20 @@ def _unpack_embedding(blob: bytes) -> list[float]:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_str_list(raw: Any) -> list[str]:
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [str(s) for s in raw]
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if isinstance(parsed, list):
+        return [str(s) for s in parsed]
+    return []
 
 
 class SqliteMemoryBackend(MemoryBackend):
@@ -148,10 +185,55 @@ class SqliteMemoryBackend(MemoryBackend):
                 )
                 """
             )
+            ledger_cols = {
+                row["name"] for row in conn.execute("PRAGMA table_info(source_ledger)").fetchall()
+            }
+            for name, decl in _LEDGER_COLUMNS:
+                if name not in ledger_cols:
+                    conn.execute(f"ALTER TABLE source_ledger ADD COLUMN {name} {decl}")
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_source_ledger_scope
                 ON source_ledger(tenant_id, user_id, project_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_dedup
+                ON memories(tenant_id, user_id, memory_type, dedup_key)
+                WHERE dedup_key != '' AND is_deleted = 0
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_write_keys (
+                    idempotency_key TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    record_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memory_jobs (
+                    id TEXT PRIMARY KEY,
+                    job_type TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    available_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_error TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_memory_jobs_status
+                ON memory_jobs(status, available_at)
                 """
             )
             conn.commit()
@@ -266,6 +348,22 @@ class SqliteMemoryBackend(MemoryBackend):
             superseded_by=row["superseded_by"] if "superseded_by" in keys and row["superseded_by"] else "",
             recall_count=int(row["recall_count"] or 0) if "recall_count" in keys else 0,
             last_recalled_at=row["last_recalled_at"] if "last_recalled_at" in keys and row["last_recalled_at"] else "",
+            as_of=row["as_of"] if "as_of" in keys and row["as_of"] else "",
+            valid_from=row["valid_from"] if "valid_from" in keys and row["valid_from"] else "",
+            valid_to=row["valid_to"] if "valid_to" in keys and row["valid_to"] else "",
+            last_verified_at=row["last_verified_at"] if "last_verified_at" in keys and row["last_verified_at"] else "",
+            observed_at=row["observed_at"] if "observed_at" in keys and row["observed_at"] else "",
+            source_updated_at=row["source_updated_at"] if "source_updated_at" in keys and row["source_updated_at"] else "",
+            confirmed_by_source_ids=_parse_str_list(
+                row["confirmed_by_source_ids"] if "confirmed_by_source_ids" in keys else None
+            ),
+            confirmation_count=int(row["confirmation_count"] or 0) if "confirmation_count" in keys else 0,
+            human_confirmed=bool(row["human_confirmed"]) if "human_confirmed" in keys else False,
+            idempotency_key=row["idempotency_key"] if "idempotency_key" in keys and row["idempotency_key"] else "",
+            entity=row["entity"] if "entity" in keys and row["entity"] else "",
+            attribute=row["attribute"] if "attribute" in keys and row["attribute"] else "",
+            value_text=row["value_text"] if "value_text" in keys and row["value_text"] else "",
+            valid_time=row["valid_time"] if "valid_time" in keys and row["valid_time"] else "",
         )
 
     def _insert_record(self, conn: sqlite3.Connection, record: MemoryRecord) -> None:
@@ -276,8 +374,12 @@ class SqliteMemoryBackend(MemoryBackend):
                 write_source, task, topic, session_id, embedding,
                 created_at, updated_at, is_deleted, metadata,
                 project_id, trust_tier, provenance, dedup_key, supersedes,
-                superseded_by, recall_count, last_recalled_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                superseded_by, recall_count, last_recalled_at,
+                as_of, valid_from, valid_to, last_verified_at, observed_at,
+                source_updated_at, confirmed_by_source_ids, confirmation_count,
+                human_confirmed, idempotency_key, entity, attribute, value_text,
+                valid_time
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.id,
@@ -303,41 +405,82 @@ class SqliteMemoryBackend(MemoryBackend):
                 record.superseded_by,
                 record.recall_count,
                 record.last_recalled_at,
+                record.as_of,
+                record.valid_from,
+                record.valid_to,
+                record.last_verified_at,
+                record.observed_at,
+                record.source_updated_at,
+                json.dumps(record.confirmed_by_source_ids, ensure_ascii=False),
+                record.confirmation_count,
+                1 if record.human_confirmed else 0,
+                record.idempotency_key,
+                record.entity,
+                record.attribute,
+                record.value_text,
+                record.valid_time,
             ),
         )
 
-    def _update_record(self, conn: sqlite3.Connection, record: MemoryRecord) -> None:
-        conn.execute(
-            """
+    def _update_record(
+        self,
+        conn: sqlite3.Connection,
+        record: MemoryRecord,
+        *,
+        expected_version: Optional[int] = None,
+    ) -> bool:
+        sql = """
             UPDATE memories SET
                 fact=?, version=?, confidence=?, updated_at=?,
                 task=?, topic=?, session_id=?, embedding=?, metadata=?,
                 project_id=?, trust_tier=?, provenance=?, dedup_key=?,
-                supersedes=?, superseded_by=?, is_deleted=?
+                supersedes=?, superseded_by=?, is_deleted=?,
+                as_of=?, valid_from=?, valid_to=?, last_verified_at=?,
+                observed_at=?, source_updated_at=?, confirmed_by_source_ids=?,
+                confirmation_count=?, human_confirmed=?, idempotency_key=?,
+                entity=?, attribute=?, value_text=?, valid_time=?
             WHERE id=? AND tenant_id=? AND user_id=?
-            """,
-            (
-                record.fact,
-                record.version,
-                record.confidence,
-                record.updated_at,
-                record.task,
-                record.topic,
-                record.session_id,
-                _pack_embedding(record.embedding) if record.embedding else None,
-                json.dumps(record.metadata, ensure_ascii=False),
-                record.project_id or "default",
-                record.trust_label(),
-                json.dumps(record.provenance.to_dict(), ensure_ascii=False),
-                record.dedup_key,
-                json.dumps(record.supersedes, ensure_ascii=False),
-                record.superseded_by,
-                1 if record.is_deleted else 0,
-                record.id,
-                record.tenant_id,
-                record.user_id,
-            ),
-        )
+            """
+        params: list[Any] = [
+            record.fact,
+            record.version,
+            record.confidence,
+            record.updated_at,
+            record.task,
+            record.topic,
+            record.session_id,
+            _pack_embedding(record.embedding) if record.embedding else None,
+            json.dumps(record.metadata, ensure_ascii=False),
+            record.project_id or "default",
+            record.trust_label(),
+            json.dumps(record.provenance.to_dict(), ensure_ascii=False),
+            record.dedup_key,
+            json.dumps(record.supersedes, ensure_ascii=False),
+            record.superseded_by,
+            1 if record.is_deleted else 0,
+            record.as_of,
+            record.valid_from,
+            record.valid_to,
+            record.last_verified_at,
+            record.observed_at,
+            record.source_updated_at,
+            json.dumps(record.confirmed_by_source_ids, ensure_ascii=False),
+            record.confirmation_count,
+            1 if record.human_confirmed else 0,
+            record.idempotency_key,
+            record.entity,
+            record.attribute,
+            record.value_text,
+            record.valid_time,
+            record.id,
+            record.tenant_id,
+            record.user_id,
+        ]
+        if expected_version is not None:
+            sql += " AND version=?"
+            params.append(expected_version)
+        cur = conn.execute(sql, params)
+        return cur.rowcount > 0
 
     def _load_active(self, *, tenant_id: str, user_id: str, project_id: str = "") -> list[MemoryRecord]:
         with self._connect() as conn:
@@ -426,6 +569,21 @@ class SqliteMemoryBackend(MemoryBackend):
         now = _now()
         with self._connect() as conn:
             for write, fact, embedding in prepared:
+                if write.idempotency_key:
+                    seen = conn.execute(
+                        "SELECT record_id FROM memory_write_keys WHERE idempotency_key=?",
+                        (write.idempotency_key,),
+                    ).fetchone()
+                    if seen:
+                        self.audit.log(
+                            tenant_id=tenant_id,
+                            user_id=user_id,
+                            action="noop",
+                            record_id=seen["record_id"],
+                            detail={"reason": "idempotent_replay"},
+                            conn=conn,
+                        )
+                        continue
                 decision = decide_write_action(
                     write, existing, policy=self.policy, new_embedding=embedding
                 )
@@ -441,10 +599,24 @@ class SqliteMemoryBackend(MemoryBackend):
                     continue
 
                 if decision.action == ConsolidationAction.UPDATE and decision.target:
+                    expected_version = decision.target.version
                     merged = apply_update(decision.target, write)
                     if embedding:
                         merged.embedding = embedding
-                    self._update_record(conn, merged)
+                    ok = self._update_record(
+                        conn, merged, expected_version=expected_version
+                    )
+                    if not ok:
+                        self.audit.log(
+                            tenant_id=tenant_id,
+                            user_id=user_id,
+                            action="noop",
+                            record_id=merged.id,
+                            detail={"reason": "version_conflict"},
+                            conn=conn,
+                        )
+                        continue
+                    self._remember_idempotency(conn, write, merged, tenant_id, user_id)
                     self.audit.log(
                         tenant_id=tenant_id,
                         user_id=user_id,
@@ -456,6 +628,7 @@ class SqliteMemoryBackend(MemoryBackend):
                     saved += 1
                     continue
 
+                frame = extract_fact_frame(fact)
                 record = MemoryRecord(
                     tenant_id=tenant_id,
                     user_id=user_id,
@@ -474,7 +647,19 @@ class SqliteMemoryBackend(MemoryBackend):
                     trust_tier=write.resolved_trust_tier(),
                     provenance=write.resolved_provenance(),
                     dedup_key=write.dedup_key,
+                    idempotency_key=write.idempotency_key,
                 )
+                apply_validity_fields(record, write)
+                if not record.valid_time:
+                    record.valid_time = frame.valid_time
+                if not record.entity:
+                    record.entity = frame.entity
+                if not record.value_text:
+                    record.value_text = frame.value
+                if not record.as_of:
+                    record.as_of = now
+                if not record.observed_at:
+                    record.observed_at = now
 
                 if decision.action == ConsolidationAction.SUPERSEDE and decision.target:
                     old = decision.target
@@ -493,7 +678,19 @@ class SqliteMemoryBackend(MemoryBackend):
                         conn=conn,
                     )
 
-                self._insert_record(conn, record)
+                try:
+                    self._insert_record(conn, record)
+                except sqlite3.IntegrityError:
+                    self.audit.log(
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        action="noop",
+                        record_id=record.id,
+                        detail={"reason": "dedup_unique_conflict"},
+                        conn=conn,
+                    )
+                    continue
+                self._remember_idempotency(conn, write, record, tenant_id, user_id)
                 existing.append(record)
                 if decision.action != ConsolidationAction.SUPERSEDE:
                     self.audit.log(
@@ -511,6 +708,26 @@ class SqliteMemoryBackend(MemoryBackend):
                 saved += 1
             conn.commit()
         return saved
+
+    def _remember_idempotency(
+        self,
+        conn: sqlite3.Connection,
+        write: MemoryWriteRequest,
+        record: MemoryRecord,
+        tenant_id: str,
+        user_id: str,
+    ) -> None:
+        key = (write.idempotency_key or record.idempotency_key or "").strip()
+        if not key:
+            return
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO memory_write_keys
+                (idempotency_key, tenant_id, user_id, record_id, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (key, tenant_id, user_id, record.id, _now()),
+        )
 
     def list_records(
         self,
@@ -544,7 +761,7 @@ class SqliteMemoryBackend(MemoryBackend):
             preferred = [r for r in records if r.project_id == project_id]
             others = [r for r in records if r.project_id != project_id]
             records = preferred + others
-        return [r for r in records if include_deleted or not r.is_expired(self.policy.ttl_days)]
+        return [r for r in records if include_deleted or not record_is_expired(r, self.policy)]
 
     async def delete_record(
         self,
@@ -668,17 +885,25 @@ class SqliteMemoryBackend(MemoryBackend):
                             UPDATE source_ledger SET
                                 hit_count = hit_count + 1,
                                 last_used_at = ?,
+                                last_checked_at = ?,
                                 quality = CASE WHEN ? != 'unknown' THEN ? ELSE quality END,
                                 session_id = ?,
-                                metadata = ?
+                                metadata = ?,
+                                content_fingerprint = CASE WHEN ? != '' THEN ? ELSE content_fingerprint END,
+                                query_purpose = CASE WHEN ? != '' THEN ? ELSE query_purpose END
                             WHERE id = ?
                             """,
                             (
+                                now,
                                 now,
                                 entry.quality,
                                 entry.quality,
                                 entry.session_id,
                                 json.dumps(entry.metadata, ensure_ascii=False),
+                                entry.content_fingerprint,
+                                entry.content_fingerprint,
+                                entry.query_purpose,
+                                entry.query_purpose,
                                 entry.id,
                             ),
                         )
@@ -688,8 +913,9 @@ class SqliteMemoryBackend(MemoryBackend):
                             INSERT INTO source_ledger (
                                 id, tenant_id, user_id, project_id, source_kind, locator,
                                 quality, hit_count, last_used_at, first_seen_at,
-                                session_id, metadata
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+                                session_id, metadata, last_checked_at, content_fingerprint,
+                                query_purpose
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 entry.id,
@@ -703,6 +929,9 @@ class SqliteMemoryBackend(MemoryBackend):
                                 now,
                                 entry.session_id,
                                 json.dumps(entry.metadata, ensure_ascii=False),
+                                now,
+                                entry.content_fingerprint,
+                                entry.query_purpose,
                             ),
                         )
                     saved += 1
@@ -749,6 +978,9 @@ class SqliteMemoryBackend(MemoryBackend):
                     hit_count=int(row["hit_count"] or 1),
                     last_used_at=row["last_used_at"] or "",
                     first_seen_at=row["first_seen_at"] or "",
+                    last_checked_at=row["last_checked_at"] if "last_checked_at" in row.keys() and row["last_checked_at"] else (row["last_used_at"] or ""),
+                    content_fingerprint=row["content_fingerprint"] if "content_fingerprint" in row.keys() and row["content_fingerprint"] else "",
+                    query_purpose=row["query_purpose"] if "query_purpose" in row.keys() and row["query_purpose"] else "",
                     session_id=row["session_id"] or "",
                     metadata=metadata,
                 )
@@ -794,7 +1026,13 @@ class SqliteMemoryBackend(MemoryBackend):
                         record.confidence = new_conf
                         changed = True
                         report.decayed += 1
-                    if should_promote(record, min_sessions=min_sessions):
+                    if should_promote(
+                        record,
+                        min_sessions=min_sessions,
+                        min_confirmations=getattr(
+                            self.policy, "consolidation_promote_min_confirmations", 2
+                        ),
+                    ):
                         record.trust_tier = TrustTier.TRUSTED
                         record.metadata = {**record.metadata, "promoted": True}
                         changed = True
@@ -812,3 +1050,94 @@ class SqliteMemoryBackend(MemoryBackend):
             return report.to_dict()
 
         return await asyncio.to_thread(_run)
+
+    def enqueue_job(self, job: MemoryJob) -> str:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO memory_jobs (
+                    id, job_type, payload, status, attempts, available_at,
+                    created_at, updated_at, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job.id,
+                    job.job_type,
+                    json.dumps(job.payload, ensure_ascii=False),
+                    job.status,
+                    job.attempts,
+                    job.available_at,
+                    job.created_at,
+                    job.updated_at,
+                    job.last_error,
+                ),
+            )
+            conn.commit()
+        return job.id
+
+    def _claim_jobs(self, limit: int = 8) -> list[MemoryJob]:
+        now = _now()
+        claimed: list[MemoryJob] = []
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM memory_jobs
+                WHERE status = 'pending' AND available_at <= ?
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                (now, limit),
+            ).fetchall()
+            for row in rows:
+                job = MemoryJob.from_row(row)
+                cur = conn.execute(
+                    """
+                    UPDATE memory_jobs
+                    SET status='running', attempts=attempts+1, updated_at=?
+                    WHERE id=? AND status='pending'
+                    """,
+                    (now, job.id),
+                )
+                if cur.rowcount:
+                    job.status = "running"
+                    job.attempts += 1
+                    claimed.append(job)
+            conn.commit()
+        return claimed
+
+    def _finish_job(self, job_id: str, *, ok: bool, error: str = "") -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE memory_jobs
+                SET status=?, last_error=?, updated_at=?
+                WHERE id=?
+                """,
+                ("done" if ok else "failed", error[:500], _now(), job_id),
+            )
+            conn.commit()
+
+    async def drain_jobs(self, limit: int = 8) -> dict[str, int]:
+        jobs = await asyncio.to_thread(self._claim_jobs, limit)
+        done = 0
+        failed = 0
+        for job in jobs:
+            try:
+                if job.job_type == "consolidate":
+                    payload = job.payload
+                    await self.consolidate(
+                        tenant_id=str(payload.get("tenant_id") or ""),
+                        user_id=str(payload.get("user_id") or ""),
+                        project_id=str(payload.get("project_id") or ""),
+                    )
+                await asyncio.to_thread(self._finish_job, job.id, ok=True, error="")
+                done += 1
+            except Exception as exc:
+                await asyncio.to_thread(self._finish_job, job.id, ok=False, error=str(exc))
+                failed += 1
+        return {"claimed": len(jobs), "done": done, "failed": failed}
+
+    def enqueue_consolidation_job(self, *, tenant_id: str, user_id: str, project_id: str = "") -> str:
+        return self.enqueue_job(
+            consolidation_job(tenant_id=tenant_id, user_id=user_id, project_id=project_id)
+        )

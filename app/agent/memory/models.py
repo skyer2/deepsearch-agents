@@ -45,6 +45,7 @@ class WriteSource(str, Enum):
     MEM0 = "mem0"
     HITL = "hitl"  # 【Phase 18】人工审批/编辑沉淀的程序性记忆
     CONSOLIDATION = "consolidation"  # 【Phase 18】离线巩固产物
+    CONFIRMATION = "confirmation"  # 独立证据或人工确认，不靠 recall_count
 
 
 @dataclass
@@ -80,6 +81,22 @@ class MemoryRecord:
     superseded_by: str = ""
     recall_count: int = 0
     last_recalled_at: str = ""
+    # 时效：写入时间 ≠ 事实发生时间
+    as_of: str = ""
+    valid_from: str = ""
+    valid_to: str = ""
+    last_verified_at: str = ""
+    observed_at: str = ""
+    source_updated_at: str = ""
+    # 独立确认（truth），与 recall_count（utility）分离
+    confirmed_by_source_ids: list[str] = field(default_factory=list)
+    confirmation_count: int = 0
+    human_confirmed: bool = False
+    idempotency_key: str = ""
+    entity: str = ""
+    attribute: str = ""
+    value_text: str = ""
+    valid_time: str = ""
 
     def age_days(self) -> int:
         try:
@@ -123,6 +140,20 @@ class MemoryRecord:
             "superseded_by": self.superseded_by,
             "recall_count": self.recall_count,
             "last_recalled_at": self.last_recalled_at,
+            "as_of": self.as_of,
+            "valid_from": self.valid_from,
+            "valid_to": self.valid_to,
+            "last_verified_at": self.last_verified_at,
+            "observed_at": self.observed_at,
+            "source_updated_at": self.source_updated_at,
+            "confirmed_by_source_ids": list(self.confirmed_by_source_ids),
+            "confirmation_count": self.confirmation_count,
+            "human_confirmed": self.human_confirmed,
+            "idempotency_key": self.idempotency_key,
+            "entity": self.entity,
+            "attribute": self.attribute,
+            "value_text": self.value_text,
+            "valid_time": self.valid_time,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "source": self.source,
@@ -163,6 +194,20 @@ class MemoryRecord:
             superseded_by=str(data.get("superseded_by") or ""),
             recall_count=int(data.get("recall_count") or 0),
             last_recalled_at=str(data.get("last_recalled_at") or ""),
+            as_of=str(data.get("as_of") or ""),
+            valid_from=str(data.get("valid_from") or ""),
+            valid_to=str(data.get("valid_to") or ""),
+            last_verified_at=str(data.get("last_verified_at") or ""),
+            observed_at=str(data.get("observed_at") or data.get("as_of") or ""),
+            source_updated_at=str(data.get("source_updated_at") or ""),
+            confirmed_by_source_ids=[str(s) for s in (data.get("confirmed_by_source_ids") or [])],
+            confirmation_count=int(data.get("confirmation_count") or 0),
+            human_confirmed=bool(data.get("human_confirmed", False)),
+            idempotency_key=str(data.get("idempotency_key") or ""),
+            entity=str(data.get("entity") or ""),
+            attribute=str(data.get("attribute") or ""),
+            value_text=str(data.get("value_text") or ""),
+            valid_time=str(data.get("valid_time") or ""),
             created_at=str(data.get("created_at") or datetime.now(timezone.utc).isoformat()),
             updated_at=str(data.get("updated_at") or data.get("created_at") or datetime.now(timezone.utc).isoformat()),
             source=str(data.get("source", "remember")),
@@ -190,6 +235,19 @@ class MemoryWriteRequest:
     trust_tier: Optional[TrustTier] = None
     provenance: Optional[Provenance] = None
     dedup_key: str = ""
+    as_of: str = ""
+    valid_from: str = ""
+    valid_to: str = ""
+    valid_time: str = ""
+    last_verified_at: str = ""
+    observed_at: str = ""
+    source_updated_at: str = ""
+    idempotency_key: str = ""
+    expected_version: Optional[int] = None
+    entity: str = ""
+    attribute: str = ""
+    value_text: str = ""
+    human_confirmed: bool = False
 
     def resolved_provenance(self) -> Provenance:
         return self.provenance or Provenance()
@@ -210,19 +268,28 @@ class MemoryWriteRequest:
 @dataclass
 class RecallResult:
     records: list[MemoryRecord]
-    recall_at_k: float
-    keyword_hits: int
-    embedding_used: bool
+    mean_recall_score: float = 0.0
+    keyword_hits: int = 0
+    embedding_used: bool = False
     # 【Phase 18】准入门与分层可观测
     candidates: int = 0
     trust_filtered: int = 0
     by_trust: dict[str, int] = field(default_factory=dict)
     by_type: dict[str, int] = field(default_factory=dict)
+    # 兼容旧字段名：这不是 IR Recall@K
+    recall_at_k: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.mean_recall_score and not self.recall_at_k:
+            self.recall_at_k = self.mean_recall_score
+        elif self.recall_at_k and not self.mean_recall_score:
+            self.mean_recall_score = self.recall_at_k
 
     def to_metrics(self) -> dict[str, Any]:
         return {
             "recalled": len(self.records),
-            "recall_at_k": self.recall_at_k,
+            "mean_recall_score": self.mean_recall_score,
+            "recall_at_k": self.mean_recall_score,  # 兼容旧观测名，语义是 mean score
             "keyword_hits": self.keyword_hits,
             "embedding_used": self.embedding_used,
             "candidates": self.candidates,
@@ -246,6 +313,9 @@ class SourceLedgerEntry:
     hit_count: int = 1
     last_used_at: str = ""
     first_seen_at: str = ""
+    last_checked_at: str = ""
+    content_fingerprint: str = ""
+    query_purpose: str = ""
     session_id: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -261,6 +331,9 @@ class SourceLedgerEntry:
             "hit_count": self.hit_count,
             "last_used_at": self.last_used_at,
             "first_seen_at": self.first_seen_at,
+            "last_checked_at": self.last_checked_at,
+            "content_fingerprint": self.content_fingerprint,
+            "query_purpose": self.query_purpose,
             "session_id": self.session_id,
             "metadata": dict(self.metadata),
         }
@@ -278,6 +351,9 @@ class SourceLedgerEntry:
             hit_count=int(data.get("hit_count") or 1),
             last_used_at=str(data.get("last_used_at") or ""),
             first_seen_at=str(data.get("first_seen_at") or ""),
+            last_checked_at=str(data.get("last_checked_at") or data.get("last_used_at") or ""),
+            content_fingerprint=str(data.get("content_fingerprint") or ""),
+            query_purpose=str(data.get("query_purpose") or ""),
             session_id=str(data.get("session_id") or ""),
             metadata=dict(data.get("metadata") or {}),
         )
