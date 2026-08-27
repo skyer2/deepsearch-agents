@@ -82,3 +82,37 @@ def validate_select_only(query: str, *, enabled: bool = True) -> Tuple[bool, str
             return False, f"forbidden_keyword:{token}"
 
     return True, ""
+
+
+_TABLE_RE = re.compile(r"\b(?:from|join)\s+`?([A-Za-z_][A-Za-z0-9_]*)`?", re.I)
+_LIMIT_RE = re.compile(r"\blimit\s+(\d+)\s*(?:,\s*\d+)?\s*$", re.I)
+
+
+def extract_table_names(query: str) -> list[str]:
+    normalized = _normalize_sql(query)
+    return [m.group(1) for m in _TABLE_RE.finditer(normalized)]
+
+
+def validate_table_allowlist(query: str, allowlist: list[str] | None) -> Tuple[bool, str]:
+    """空 allowlist 视为开发态（允许全部表）；生产应配置显式表白名单。"""
+    if not allowlist:
+        return True, ""
+    allowed = {name.strip().strip("`").lower() for name in allowlist if name}
+    for table in extract_table_names(query):
+        if table.lower() not in allowed:
+            return False, f"table_not_allowed:{table}"
+    return True, ""
+
+
+def cap_select_limit(query: str, max_rows: int) -> str:
+    """服务端封顶 LIMIT，避免 SELECT * FROM huge_table 把百万行拉进进程。"""
+    if max_rows <= 0:
+        return query
+    text = str(query).rstrip().rstrip(";")
+    match = _LIMIT_RE.search(text)
+    if match:
+        current = int(match.group(1))
+        if current > max_rows:
+            return text[: match.start()] + f"LIMIT {max_rows}"
+        return text
+    return f"{text} LIMIT {max_rows}"

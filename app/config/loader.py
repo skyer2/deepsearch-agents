@@ -126,10 +126,22 @@ class HarnessConfig:
     mcp_tasks_enabled: bool = True
     mcp_gateway_rate_limit_per_minute: int = 120
     mcp_gateway_oauth_token: str = ""
+    mcp_require_auth: bool = False
+    mcp_pool_size: int = 3
+    mcp_queue_limit: int = 32
+    mcp_oauth_audience: str = "https://mcp.local/gateway"
+    mcp_oauth_issuer: str = "deepsearch-harness"
+    mcp_breaker_failure_threshold: int = 5
+    mcp_breaker_reset_sec: float = 30.0
+    mcp_trusted_servers: dict[str, Any] = field(default_factory=dict)
 
     tools_fail_closed: bool = True
     tools_sql_select_only: bool = True
     tools_enforce_step_policy: bool = True
+    tools_sql_max_rows: int = 200
+    tools_sql_max_bytes: int = 262144
+    tools_sql_timeout_ms: int = 5000
+    tools_sql_table_allowlist: list[str] = field(default_factory=list)
 
     hitl_enabled: bool = True
     hitl_timeout_sec: int = 600
@@ -514,6 +526,17 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
         mcp_gateway_oauth_token=str(
             os.getenv("HARNESS_MCP_GATEWAY_OAUTH_TOKEN", mcp.get("gateway_oauth_token", ""))
         ),
+        mcp_require_auth=_env_bool(
+            "HARNESS_MCP_REQUIRE_AUTH",
+            bool(mcp.get("require_auth", False)),
+        ),
+        mcp_pool_size=int(os.getenv("HARNESS_MCP_POOL_SIZE", mcp.get("pool_size", 3))),
+        mcp_queue_limit=int(os.getenv("HARNESS_MCP_QUEUE_LIMIT", mcp.get("queue_limit", 32))),
+        mcp_oauth_audience=str(mcp.get("oauth_audience", "https://mcp.local/gateway")),
+        mcp_oauth_issuer=str(mcp.get("oauth_issuer", "deepsearch-harness")),
+        mcp_breaker_failure_threshold=int(mcp.get("breaker_failure_threshold", 5)),
+        mcp_breaker_reset_sec=float(mcp.get("breaker_reset_sec", 30)),
+        mcp_trusted_servers=dict(mcp.get("trusted_servers") or {}),
         tools_fail_closed=_env_bool(
             "HARNESS_TOOLS_FAIL_CLOSED",
             bool(raw.get("tools", {}).get("fail_closed", True)),
@@ -526,6 +549,18 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
             "HARNESS_TOOLS_ENFORCE_STEP_POLICY",
             bool(raw.get("tools", {}).get("enforce_step_policy", True)),
         ),
+        tools_sql_max_rows=int(
+            os.getenv("HARNESS_SQL_MAX_ROWS", raw.get("tools", {}).get("sql_max_rows", 200))
+        ),
+        tools_sql_max_bytes=int(
+            os.getenv("HARNESS_SQL_MAX_BYTES", raw.get("tools", {}).get("sql_max_bytes", 262144))
+        ),
+        tools_sql_timeout_ms=int(
+            os.getenv("HARNESS_SQL_TIMEOUT_MS", raw.get("tools", {}).get("sql_timeout_ms", 5000))
+        ),
+        tools_sql_table_allowlist=[
+            str(x) for x in (raw.get("tools", {}).get("sql_table_allowlist") or [])
+        ],
         hitl_enabled=_env_bool("HARNESS_HITL_ENABLED", bool(hitl.get("enabled", True))),
         hitl_timeout_sec=int(hitl.get("timeout_sec", 600)),
         hitl_interrupt_on={
@@ -694,3 +729,4 @@ def reload_harness_config() -> HarnessConfig:
 
 
 reset_harness_config = reload_harness_config
+get_config = get_harness_config

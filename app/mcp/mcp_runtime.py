@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sys
 from typing import Any, Literal, Optional
 
@@ -36,10 +35,12 @@ class MCPServerRuntime:
         self._python = python_executable or sys.executable
 
     def _server_params(self) -> StdioServerParameters:
+        from app.mcp.server_env import build_server_env, server_id_for_module
+
         return StdioServerParameters(
             command=self._python,
             args=["-m", self.server_module],
-            env=os.environ.copy(),
+            env=build_server_env(server_id_for_module(self.server_module)),
         )
 
     async def call_tool(
@@ -76,14 +77,15 @@ class MCPServerRuntime:
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 result = await session.call_tool(tool_name, arguments)
-                if not result.content:
-                    return ""
-                block = result.content[0]
-                text = getattr(block, "text", None) or str(block)
-                try:
-                    return json.loads(text)
-                except json.JSONDecodeError:
-                    return text
+                from app.mcp.result_normalizer import normalize_mcp_result
+
+                visible = normalize_mcp_result(result).model_visible()
+                if isinstance(visible, str):
+                    try:
+                        return json.loads(visible)
+                    except json.JSONDecodeError:
+                        return visible
+                return visible
 
     async def call_tool_legacy(self, tool_name: str, arguments: dict[str, Any]) -> Any:
         """向后兼容：无 timeout/retry。"""

@@ -79,7 +79,31 @@ def convert_md_to_pdf_async(md_filename: str, pdf_filename: Optional[str] = None
         tool_name="convert_md_to_pdf_async",
         runner=_run,
     )
-    return json.dumps({"task_id": task_id, "status": "pending"}, ensure_ascii=False)
+    rec = manager.get(task_id)
+    handle = rec.to_handle() if rec else {"task_id": task_id, "status": "pending", "kind": "mcp.task"}
+    return json.dumps(handle, ensure_ascii=False)
+
+
+@mcp.tool()
+def tasks_get(task_id: str) -> str:
+    """协议风格 tasks/get：从 durable store 读取任务。跨进程可 poll。"""
+    from app.mcp.mcp_tasks import get_mcp_task_manager
+
+    rec = get_mcp_task_manager().get(task_id)
+    if rec is None:
+        return json.dumps({"ok": False, "error": "not_found", "task_id": task_id}, ensure_ascii=False)
+    return json.dumps(rec.to_dict(), ensure_ascii=False)
+
+
+@mcp.tool()
+def tasks_cancel(task_id: str) -> str:
+    """协议风格 tasks/cancel。"""
+    from app.mcp.mcp_tasks import get_mcp_task_manager
+
+    rec = get_mcp_task_manager().cancel(task_id)
+    if rec is None:
+        return json.dumps({"ok": False, "error": "not_found", "task_id": task_id}, ensure_ascii=False)
+    return json.dumps(rec.to_dict(), ensure_ascii=False)
 
 
 if __name__ == "__main__":

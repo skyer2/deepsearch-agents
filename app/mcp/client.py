@@ -11,7 +11,8 @@ import os
 from typing import Any
 
 from app.config.loader import get_harness_config
-from app.mcp.registry import MCPToolDescriptor, mcp_registry
+from app.mcp.registry import MCPToolDescriptor
+import app.mcp.registry as registry_mod
 from app.tools.db_tools import execute_sql_query, get_table_data, list_sql_tables
 from app.tools.markdown_tools import generate_markdown
 from app.tools.pdf_tools import convert_md_to_pdf
@@ -69,7 +70,7 @@ def _enabled_mcp_servers() -> list[str]:
 
 
 def _register_local_tool(desc: MCPToolDescriptor, tool: Any) -> None:
-    mcp_registry.register(desc, tool, transport="langchain-tool")
+    registry_mod.mcp_registry.register(desc, tool, transport="langchain-tool")
 
 
 def _bootstrap_local_registry() -> None:
@@ -229,7 +230,7 @@ def _register_static_mcp_tools(server_ids: list[str]) -> None:
             description=tool_name,
             step_type=policy["step_types"][0],
         )
-        mcp_registry.register(
+        registry_mod.mcp_registry.register(
             MCPToolDescriptor(
                 name=tool_name,
                 description=tool_name,
@@ -260,7 +261,7 @@ def _register_mcp_files_tools() -> None:
             description=desc,
             step_type=step_types[0],
         )
-        mcp_registry.register(
+        registry_mod.mcp_registry.register(
             MCPToolDescriptor(
                 name=name,
                 description=desc,
@@ -351,10 +352,10 @@ def _bootstrap_hybrid_registry(enabled_mcp: list[str]) -> None:
 
 
 def bootstrap_mcp_registry(*, force: bool = False) -> None:
-    if mcp_registry.list_descriptors() and not force:
+    if registry_mod.mcp_registry.list_descriptors() and not force:
         return
     if force:
-        mcp_registry.clear()
+        registry_mod.mcp_registry.clear()
 
     enabled = _enabled_mcp_servers()
     if enabled:
@@ -366,13 +367,13 @@ def bootstrap_mcp_registry(*, force: bool = False) -> None:
 
 def get_internet_search_tool() -> Any:
     bootstrap_mcp_registry()
-    return mcp_registry.get_tool("internet_search")
+    return registry_mod.mcp_registry.get_tool("internet_search")
 
 
 def get_db_tools() -> list[Any]:
     bootstrap_mcp_registry()
     return [
-        mcp_registry.get_tool(n)
+        registry_mod.mcp_registry.get_tool(n)
         for n in ("list_sql_tables", "get_table_data", "execute_sql_query")
     ]
 
@@ -380,7 +381,7 @@ def get_db_tools() -> list[Any]:
 def get_ragflow_tools() -> list[Any]:
     bootstrap_mcp_registry()
     return [
-        mcp_registry.get_tool(n)
+        registry_mod.mcp_registry.get_tool(n)
         for n in ("get_assistant_list", "create_ask_delete")
     ]
 
@@ -388,4 +389,4 @@ def get_ragflow_tools() -> list[Any]:
 def get_file_tools() -> list[Any]:
     bootstrap_mcp_registry()
     names = ["read_file_content", "generate_markdown", "convert_md_to_pdf"]
-    return [mcp_registry.get_tool(n) for n in names if mcp_registry.get_tool(n)]
+    return [registry_mod.mcp_registry.get_tool(n) for n in names if registry_mod.mcp_registry.get_tool(n)]

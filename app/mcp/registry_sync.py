@@ -6,7 +6,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.mcp.registry import MCPToolDescriptor, mcp_registry
+from app.mcp.registry import MCPToolDescriptor
+import app.mcp.registry as registry_mod
 from app.mcp.session_pool import MCPSessionPool, use_session_pool
 from app.mcp.tool_factory import build_mcp_tool
 from app.mcp.mcp_runtime import (
@@ -85,7 +86,11 @@ def sync_mcp_registry_from_servers(enabled_servers: list[str]) -> int:
     for _sid, module in modules.items():
         try:
             for item in _list_tools_for_server(module):
-                remote_by_name[item["name"]] = item
+                remote_by_name[item["name"]] = {
+                    **item,
+                    "_server_id": _sid,
+                    "_module": module,
+                }
         except Exception as exc:
             print(f"[RegistrySync] list_tools failed for {module}: {exc}")
 
@@ -105,8 +110,9 @@ def sync_mcp_registry_from_servers(enabled_servers: list[str]) -> int:
             tool_name=tool_name,
             description=description,
             step_type=step_types[0] if step_types else "",
+            input_schema=remote.get("input_schema") or remote.get("inputSchema"),
         )
-        mcp_registry.register_or_update(
+        registry_mod.mcp_registry.register_or_update(
             MCPToolDescriptor(
                 name=tool_name,
                 description=description,
@@ -118,4 +124,31 @@ def sync_mcp_registry_from_servers(enabled_servers: list[str]) -> int:
             langchain_tool,
         )
         synced += 1
+
+    for extra_name, remote in remote_by_name.items():
+        if extra_name in TOOL_STEP_POLICY:
+            continue
+        owning = str(remote.get("_server_id") or "")
+        server_module = str(remote.get("_module") or SERVER_MODULES_BY_ID.get(owning, ""))
+        if not owning or not server_module:
+            continue
+        langchain_tool = build_mcp_tool(
+            server_module=server_module,
+            server_id=owning,
+            tool_name=extra_name,
+            description=str(remote.get("description") or extra_name),
+            step_type="",
+            input_schema=remote.get("input_schema") or remote.get("inputSchema"),
+        )
+        registry_mod.mcp_registry.register_or_update(
+            MCPToolDescriptor(
+                name=extra_name,
+                description=str(remote.get("description") or extra_name),
+                server=owning,
+                permissions=["read"],
+                step_types=[],
+                transport="mcp-pool" if use_session_pool() else "mcp-stdio",
+            ),
+            langchain_tool,
+        )
     return synced

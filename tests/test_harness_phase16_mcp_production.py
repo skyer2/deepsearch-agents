@@ -10,9 +10,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app.config.loader import reload_harness_config
+from app.mcp.auth import MCPPrincipal, issue_access_token
 from app.mcp.client import bootstrap_mcp_registry
 from app.mcp.mcp_gateway import MCPGateway, reset_mcp_gateway
 from app.mcp.mcp_tasks import get_mcp_task_manager
+from app.mcp.policy_context import ToolCallContext, reset_tool_call_context, set_tool_call_context
 from app.mcp.registry import MCPRegistry
 import app.mcp.registry as registry_mod
 
@@ -30,18 +32,28 @@ def test_mcp_gateway_rate_limit():
 
 def test_mcp_gateway_oauth():
     reset_mcp_gateway()
-    gw = MCPGateway(oauth_token="secret")
-    ok, _ = gw.authorize("agent", "tool")
+    gw = MCPGateway(require_auth=True)
+    ok, code = gw.authorize("agent", "internet_search")
     assert not ok
-    import os
+    assert code in {"missing_access_token", "malformed_access_token"}
 
-    os.environ["HARNESS_MCP_GATEWAY_TOKEN"] = "secret"
+    token = issue_access_token(
+        MCPPrincipal(user_id="u1", tenant_id="acme", scopes=["read", "search"])
+    )
+    ctx_token = set_tool_call_context(
+        ToolCallContext(
+            access_token=token,
+            user_id="u1",
+            tenant_id="acme",
+            granted_scopes=["read", "search"],
+        )
+    )
     try:
-        ok2, _ = gw.authorize("agent", "tool")
+        ok2, _ = gw.authorize("agent", "internet_search")
         assert ok2
         print("[OK] mcp gateway oauth")
     finally:
-        os.environ.pop("HARNESS_MCP_GATEWAY_TOKEN", None)
+        reset_tool_call_context(ctx_token)
 
 
 def test_mcp_tasks_poll():

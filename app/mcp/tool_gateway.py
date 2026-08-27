@@ -10,7 +10,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from app.mcp.registry import MCPToolDescriptor, mcp_registry
+import app.mcp.registry as registry_mod
 from app.mcp.sql_guard import validate_select_only, validate_sql_identifier
 
 
@@ -82,7 +82,7 @@ class ToolGateway:
         if not step_type:
             return ToolValidationResult(allowed=True)
 
-        descriptors = mcp_registry.list_descriptors(step_type)
+        descriptors = registry_mod.mcp_registry.list_descriptors(step_type)
         allowed_names = {d.name for d in descriptors}
         if tool_name in allowed_names:
             return ToolValidationResult(allowed=True)
@@ -98,11 +98,11 @@ class ToolGateway:
             "fail_closed": self.fail_closed,
             "sql_select_only": self.sql_select_only,
             "enforce_step_policy": self.enforce_step_policy,
-            "registered_tools": len(mcp_registry.list_descriptors()),
+            "registered_tools": len(registry_mod.mcp_registry.list_descriptors()),
             "step_policies": {
-                step: [d.name for d in mcp_registry.list_descriptors(step)]
+                step: [d.name for d in registry_mod.mcp_registry.list_descriptors(step)]
                 for step in sorted(
-                    {st for d in mcp_registry.list_descriptors() for st in d.step_types}
+                    {st for d in registry_mod.mcp_registry.list_descriptors() for st in d.step_types}
                 )
             },
         }

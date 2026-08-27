@@ -27,6 +27,7 @@ def build_mcp_tool(
     description: str,
     step_type: str = "",
     invoke: Optional[Callable[..., Any]] = None,
+    input_schema: Optional[dict[str, Any]] = None,
 ) -> StructuredTool:
     """构建经 MCP Gateway 调用的 LangChain Tool。"""
 
@@ -144,6 +145,8 @@ def build_mcp_tool(
                 return text
             try:
                 payload = json.loads(text) if isinstance(text, str) else raw
+                if not isinstance(payload, dict):
+                    payload = {}
                 task_id = payload.get("task_id")
                 if task_id:
                     rec = get_mcp_task_manager().wait(task_id, timeout_sec=180.0)
@@ -153,18 +156,26 @@ def build_mcp_tool(
                         {"ok": False, "error": rec.error, "task_id": task_id},
                         ensure_ascii=False,
                     )
-            except (json.JSONDecodeError, KeyError, TypeError):
+            except (json.JSONDecodeError, KeyError, TypeError, TimeoutError):
                 pass
             return text
 
     else:
+        from app.mcp.schema_adapter import build_structured_tool
 
-        def func(**kwargs: Any) -> Any:
+        def _invoke(payload: dict[str, Any]) -> Any:
             monitor.report_tool(
                 tool_name=tool_name,
-                args={"transport": "mcp-gateway", **kwargs},
+                args={"transport": "mcp-gateway", **payload},
             )
-            return gateway.call_tool(server_module, tool_name, kwargs, step_type=step_type)
+            return gateway.call_tool(server_module, tool_name, payload, step_type=step_type)
+
+        return build_structured_tool(
+            name=tool_name,
+            description=f"{description}（MCP {server_id}）",
+            invoke=_invoke,
+            input_schema=input_schema,
+        )
 
     return StructuredTool.from_function(
         func=func,  # type: ignore[arg-type]

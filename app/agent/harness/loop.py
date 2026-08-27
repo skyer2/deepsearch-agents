@@ -40,7 +40,7 @@ from app.agent.harness.context_builder import ContextBuilder
 from app.agent.harness.artifacts import ArtifactStore, get_artifact_store, set_artifact_store, reset_artifact_store
 from app.agent.harness.evidence_store import EvidenceStore, get_evidence_store, set_evidence_store, reset_evidence_store
 from app.agent.harness.research_brief import compile_research_brief
-from app.agent.harness.worker_profiles import resolve_worker_profile
+from app.agent.harness.worker_profiles import resolve_worker_profile, tools_for_profile
 from app.agent.harness.hitl import hitl_coordinator
 from app.agent.harness.planner import (
     apply_intent_clarification,
@@ -126,6 +126,7 @@ class HarnessRunContext:
     idempotency: IdempotencyRegistry
     identity_token: Any
     run_started: float
+    policy_token: Any = None
     restored_full: bool = False
     step_index: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -176,6 +177,15 @@ class AgentHarness:
 
     def _agent_for_step(self, step: PlanStep) -> tuple[Any, str]:
         profile = resolve_worker_profile(step.step_type, step.allowed_tools)
+        try:
+            from app.mcp.policy_context import get_tool_call_context
+
+            ctx = get_tool_call_context()
+            if ctx is not None:
+                ctx.step_type = step.step_type or ctx.step_type
+                ctx.allowed_tools = list(step.allowed_tools or tools_for_profile(profile))
+        except Exception:
+            pass
         return resolve_execute_target(
             step.step_type,
             workers=self.workers,
@@ -322,6 +332,32 @@ class AgentHarness:
             project_id=project_id,
         )
         identity_token = set_memory_identity(identity)
+        try:
+            from app.mcp.auth import MCPPrincipal, issue_access_token
+            from app.mcp.policy_context import ToolCallContext, set_tool_call_context
+
+            principal = MCPPrincipal(
+                tenant_id=identity.tenant_id,
+                user_id=identity.user_id,
+                scopes=["read", "search", "write"],
+                ephemeral=identity.ephemeral,
+            )
+            access_token = issue_access_token(principal)
+            policy_token = set_tool_call_context(
+                ToolCallContext(
+                    tenant_id=identity.tenant_id,
+                    user_id=identity.user_id,
+                    project_id=identity.project_id,
+                    session_id=session_id,
+                    run_id=self._current_trace_id,
+                    trace_id=self._current_trace_id,
+                    granted_scopes=["read", "search", "write"],
+                    access_token=access_token,
+                    ephemeral=identity.ephemeral,
+                )
+            )
+        except Exception:
+            policy_token = None
         artifact_store = ArtifactStore(session_dir)
         artifact_store.load(session_dir)
         evidence_store = EvidenceStore(session_dir)
@@ -369,6 +405,7 @@ class AgentHarness:
             idempotency=idempotency,
             identity_token=identity_token,
             run_started=run_started,
+            policy_token=policy_token,
             restored_full=restored_full,
             step_index=step_index,
         )
@@ -381,6 +418,13 @@ class AgentHarness:
         reset_evidence_store()
         reset_session_context(ctx.tokens[0], ctx.tokens[1])
         reset_memory_identity(ctx.identity_token)
+        try:
+            from app.mcp.policy_context import reset_tool_call_context
+
+            if ctx.policy_token is not None:
+                reset_tool_call_context(ctx.policy_token)
+        except Exception:
+            pass
 
     async def run(
         self,
