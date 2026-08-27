@@ -34,7 +34,7 @@ class HarnessConfig:
     compression_threshold_chars: int = 2000
     compression_model: str = "qwen-turbo"
 
-    context_max_step_message_tokens: int = 12_000
+    context_max_step_message_tokens: int = 16_000
     context_prior_results_max_steps: int = 5
     context_prior_snippet_max_chars: int = 400
     context_wrap_untrusted_external: bool = True
@@ -44,6 +44,17 @@ class HarnessConfig:
     context_working_notes_enabled: bool = True
     context_evidence_lookup_enabled: bool = True
     context_clear_bulky_tool_results: bool = True
+    context_jit_retrieval_enabled: bool = True
+    context_research_brief_as_anchor: bool = True
+    context_evidence_max_items: int = 12
+    context_reversible_compression: bool = True
+    context_tool_output_contract: bool = True
+    token_budget_model: str = "glm-5.2"
+    token_context_window: int = 128_000
+    token_tool_schema_tokens: int = 4_000
+    token_reserved_output_tokens: int = 8_000
+    token_safety_margin: int = 2_000
+    token_stage_budgets: dict[str, int] = field(default_factory=dict)
     compression_retention_check: bool = True
     compression_retention_min_url: float = 0.8
     compression_retention_min_number: float = 0.5
@@ -213,7 +224,7 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
         context_max_step_message_tokens=int(
             os.getenv(
                 "HARNESS_CONTEXT_MAX_STEP_TOKENS",
-                context_cfg.get("max_step_message_tokens", 12_000),
+                context_cfg.get("max_step_message_tokens", 16_000),
             )
         ),
         context_prior_results_max_steps=int(
@@ -250,6 +261,45 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
             "HARNESS_CONTEXT_CLEAR_TOOL_RESULTS",
             bool(context_cfg.get("clear_bulky_tool_results", True)),
         ),
+        context_jit_retrieval_enabled=_env_bool(
+            "HARNESS_CONTEXT_JIT",
+            bool(context_cfg.get("jit_retrieval_enabled", True)),
+        ),
+        context_research_brief_as_anchor=_env_bool(
+            "HARNESS_CONTEXT_BRIEF_ANCHOR",
+            bool(context_cfg.get("research_brief_as_anchor", True)),
+        ),
+        context_evidence_max_items=int(context_cfg.get("evidence_max_items", 12)),
+        context_reversible_compression=_env_bool(
+            "HARNESS_REVERSIBLE_COMPRESSION",
+            bool(context_cfg.get("reversible_compression", True)),
+        ),
+        context_tool_output_contract=_env_bool(
+            "HARNESS_TOOL_OUTPUT_CONTRACT",
+            bool(context_cfg.get("tool_output_contract", True)),
+        ),
+        token_budget_model=str(
+            os.getenv(
+                "HARNESS_TOKEN_MODEL",
+                (raw.get("token_budget") or {}).get("model", "glm-5.2"),
+            )
+        ),
+        token_context_window=int(
+            (raw.get("token_budget") or {}).get("context_window", 128_000)
+        ),
+        token_tool_schema_tokens=int(
+            (raw.get("token_budget") or {}).get("tool_schema_tokens", 4_000)
+        ),
+        token_reserved_output_tokens=int(
+            (raw.get("token_budget") or {}).get("reserved_output_tokens", 8_000)
+        ),
+        token_safety_margin=int(
+            (raw.get("token_budget") or {}).get("safety_margin", 2_000)
+        ),
+        token_stage_budgets={
+            str(k): int(v)
+            for k, v in dict((raw.get("token_budget") or {}).get("stages") or {}).items()
+        },
         compression_retention_check=_env_bool(
             "HARNESS_COMPRESSION_RETENTION",
             bool(compression.get("retention_check", True)),
@@ -600,6 +650,12 @@ def get_harness_config() -> HarnessConfig:
 def reload_harness_config() -> HarnessConfig:
     global _cached_config
     _cached_config = load_harness_config()
+    try:
+        from app.agent.harness.token_counter import reset_token_counter
+
+        reset_token_counter()
+    except Exception:
+        pass
     return _cached_config
 
 

@@ -2,7 +2,7 @@
 上下文构建
 
 【Phase 11】四层上下文 + 分层 token 统计 + prior 步数预算 + 外部内容 untrusted 包裹。
-四层：System(计划/意图) + Memory + Session + Task/Step + Tool(MCP)
+【Phase 23】Research Brief 锚点 + JIT Context Selector + model-aware budget。
 """
 
 from __future__ import annotations
@@ -15,16 +15,19 @@ from app.agent.harness.context_budget import (
     fit_layers_to_token_budget,
     join_layers,
     measure_layers,
-    trim_text_to_token_budget,
     wrap_untrusted_block,
 )
+from app.agent.harness.context_selector import select_step_context
+from app.agent.harness.evidence_store import get_evidence_store
 from app.agent.harness.orchestration import (
     SYNTHESIS_STEP_TYPES,
     aggregate_evidence_digest,
     build_worker_output_instruction,
     format_evidence_digest_for_prompt,
 )
+from app.agent.harness.research_brief import ResearchBrief, compile_research_brief
 from app.agent.harness.state import ExecutionPlan, LoopState, PlanStep, StepStatus, TaskIntent
+from app.agent.harness.token_counter import stage_from_step_type
 from app.agent.memory.models import MemoryRecord
 from app.mcp.registry import mcp_registry
 
@@ -54,6 +57,12 @@ class ContextBuilder:
                 layer_priority_eviction=cfg.context_layer_priority_eviction,
                 evidence_lookup_enabled=cfg.context_evidence_lookup_enabled,
                 working_notes_enabled=cfg.context_working_notes_enabled,
+                jit_retrieval_enabled=getattr(cfg, "context_jit_retrieval_enabled", True),
+                research_brief_as_anchor=getattr(cfg, "context_research_brief_as_anchor", True),
+                token_model=getattr(cfg, "token_budget_model", "glm-5.2"),
+                stage_budgets=dict(getattr(cfg, "token_stage_budgets", None) or {}),
+                memory_top_k=int(getattr(cfg, "memory_recall_top_k", 5) or 5),
+                evidence_max_items=int(getattr(cfg, "context_evidence_max_items", 12) or 12),
             )
         )
 
@@ -220,13 +229,23 @@ class ContextBuilder:
         if not state.step_results:
             return ""
 
-        # 【Phase 8】写报告/汇总：用完整 evidence digest，不用 600 字截断
-        if (
-            use_evidence_digest
-            and current_step_type in SYNTHESIS_STEP_TYPES
-        ):
+        # 合成步优先 JIT claim/evidence，避免 full digest 爆炸。
+        if use_evidence_digest and current_step_type in SYNTHESIS_STEP_TYPES:
+            store = get_evidence_store()
+            if store.spans or store.findings:
+                objective = getattr(state, "research_brief_obj", None)
+                query = ""
+                if isinstance(objective, ResearchBrief):
+                    query = objective.objective
+                query = query or (state.intent.summary if state.intent else "") or ""
+                findings = store.lookup_block(query=query, max_items=self.settings.evidence_max_items)
+                if findings.strip():
+                    self._last_used_digest = True
+                    return findings
             digest = aggregate_evidence_digest(state.step_results)
-            digest_text = format_evidence_digest_for_prompt(digest)
+            digest_text = format_evidence_digest_for_prompt(
+                digest, max_steps=self.settings.evidence_max_items
+            )
             if digest_text.strip():
                 self._last_used_digest = True
                 return digest_text
@@ -357,20 +376,57 @@ class ContextBuilder:
         self._last_used_digest = False
         self._last_truncated_prior = 0
         total = len(state.plan.steps) if state.plan else 1
-        layer_parts = {
-            "task_query": task_query,
-            "intent": self.build_intent_instruction(state.intent) if state.intent else "",
-            "notes": self.build_working_notes_context(getattr(state, "working_notes", "") or ""),
-            "memory": self.build_memory_context(
-                state.memory_facts,
-                records=state.memory_records,
-                wrap_untrusted=getattr(state, "memory_wrap_untrusted", False),
-                source_ledger=getattr(state, "memory_source_ledger", None),
-            ),
-            "evidence": self.build_evidence_lookup_context(
+        brief = self._resolve_brief(state, task_query)
+        selected = select_step_context(
+            step_type=step.step_type,
+            task_query=task_query,
+            objective=step.objective or step.description,
+            brief=brief,
+            memory_facts=list(state.memory_facts or []),
+            memory_records=list(state.memory_records or []),
+            source_ledger=list(getattr(state, "memory_source_ledger", None) or []),
+            working_notes=getattr(state, "working_notes", "") or "",
+            jit_enabled=self.settings.jit_retrieval_enabled,
+            memory_top_k=self.settings.memory_top_k,
+            evidence_max_items=self.settings.evidence_max_items,
+        )
+        memory_facts = [
+            line for line in selected.optional.get("memory_facts", "").split("\n") if line
+        ]
+        if not self.settings.jit_retrieval_enabled:
+            memory_facts = list(state.memory_facts or [])
+        task_layer = ""
+        if not (self.settings.research_brief_as_anchor and brief and not brief.is_empty()):
+            task_layer = task_query
+        elif len(task_query) <= 160:
+            task_layer = task_query
+
+        evidence_layer = selected.optional.get("evidence") or ""
+        if not evidence_layer:
+            evidence_layer = self.build_evidence_lookup_context(
                 getattr(state, "evidence_lookup_block", "") or "",
                 step.step_type,
+            )
+        findings = selected.optional.get("findings") or ""
+        if findings:
+            evidence_layer = "\n".join(part for part in [findings, evidence_layer] if part)
+
+        layer_parts = {
+            "brief": selected.mandatory.get("brief") or "",
+            "task_query": task_layer,
+            "intent": self.build_intent_instruction(state.intent) if state.intent else "",
+            "notes": self.build_working_notes_context(
+                selected.optional.get("notes") or getattr(state, "working_notes", "") or ""
             ),
+            "memory": self.build_memory_context(
+                memory_facts,
+                records=state.memory_records if not self.settings.jit_retrieval_enabled else None,
+                wrap_untrusted=getattr(state, "memory_wrap_untrusted", False),
+                source_ledger=getattr(state, "memory_source_ledger", None)
+                if not self.settings.jit_retrieval_enabled
+                else None,
+            ),
+            "evidence": evidence_layer,
             "prior_results": self.build_prior_results_context(
                 state,
                 current_step_type=step.step_type,
@@ -391,18 +447,29 @@ class ContextBuilder:
                 f"\n    【恢复提示】\n    {hint}" for hint in state.recovery_hints
             ),
         }
-        metrics = measure_layers(layer_parts)
+        counter = self.settings.counter()
+        budget = self.settings.budget_for_step(step.step_type)
+        metrics = measure_layers(layer_parts, counter)
         metrics.truncated_prior_steps = getattr(self, "_last_truncated_prior", 0)
         metrics.used_evidence_digest = getattr(self, "_last_used_digest", False)
+        metrics.stage = stage_from_step_type(step.step_type)
+        metrics.budget_tokens = budget
+        metrics.jit_dropped = list(selected.dropped)
+        metrics.evidence_retrieved_count = len(selected.evidence_ids)
 
-        if metrics.total_tokens > self.settings.max_step_message_tokens:
+        if metrics.total_tokens > budget:
             message, metrics = fit_layers_to_token_budget(
                 layer_parts,
-                self.settings.max_step_message_tokens,
+                budget,
                 enabled=self.settings.layer_priority_eviction,
+                counter=counter,
             )
             metrics.truncated_prior_steps = getattr(self, "_last_truncated_prior", 0)
             metrics.used_evidence_digest = getattr(self, "_last_used_digest", False)
+            metrics.stage = stage_from_step_type(step.step_type)
+            metrics.budget_tokens = budget
+            metrics.jit_dropped = list(selected.dropped)
+            metrics.evidence_retrieved_count = len(selected.evidence_ids)
         else:
             message = join_layers(layer_parts)
 
@@ -438,3 +505,21 @@ class ContextBuilder:
         for hint in state.recovery_hints:
             parts.append(f"\n    【恢复提示】\n    {hint}")
         return "\n".join(parts)
+
+    def _resolve_brief(self, state: LoopState, task_query: str) -> ResearchBrief:
+        existing = getattr(state, "research_brief_obj", None)
+        if isinstance(existing, ResearchBrief) and not existing.is_empty():
+            return existing
+        plan_brief = ""
+        if state.plan and getattr(state.plan, "research_brief", ""):
+            plan_brief = str(state.plan.research_brief)
+        brief = compile_research_brief(
+            task_query=task_query,
+            intent=state.intent,
+            plan_brief=plan_brief,
+        )
+        try:
+            state.research_brief_obj = brief
+        except Exception:
+            pass
+        return brief

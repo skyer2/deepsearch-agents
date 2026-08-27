@@ -151,7 +151,7 @@ def _bootstrap_local_registry() -> None:
                 description="读取当前会话上传文件",
                 server="file-mcp",
                 permissions=["read"],
-                step_types=["file_read"],
+                step_types=["file_read", "research"],
             ),
         ),
         (
@@ -176,6 +176,43 @@ def _bootstrap_local_registry() -> None:
         ),
     ]:
         _register_local_tool(desc, file_tool_map[name])
+
+
+_CONTEXT_STEP_TYPES = [
+    "network_search",
+    "database_query",
+    "knowledge_base",
+    "file_read",
+    "research",
+    "generate_markdown",
+    "summarize",
+    "convert_pdf",
+]
+
+
+def _register_context_tools() -> None:
+    from app.tools.artifact_tools import read_artifact, read_evidence
+
+    _register_local_tool(
+        MCPToolDescriptor(
+            name="read_artifact",
+            description="按 artifact_id 回读已外置的原始工具结果",
+            server="context-store",
+            permissions=["read"],
+            step_types=list(_CONTEXT_STEP_TYPES),
+        ),
+        read_artifact,
+    )
+    _register_local_tool(
+        MCPToolDescriptor(
+            name="read_evidence",
+            description="按 evidence_id 回读证据 span",
+            server="context-store",
+            permissions=["read"],
+            step_types=list(_CONTEXT_STEP_TYPES),
+        ),
+        read_evidence,
+    )
 
 
 def _register_static_mcp_tools(server_ids: list[str]) -> None:
@@ -274,7 +311,7 @@ def _bootstrap_hybrid_registry(enabled_mcp: list[str]) -> None:
                     description=name,
                     server="mysql-mcp",
                     permissions=["read"],
-                    step_types=["database_query"],
+                    step_types=["database_query", "research"],
                 ),
                 db_map[name],
             )
@@ -324,6 +361,7 @@ def bootstrap_mcp_registry(*, force: bool = False) -> None:
         _bootstrap_hybrid_registry(enabled)
     else:
         _bootstrap_local_registry()
+    _register_context_tools()
 
 
 def get_internet_search_tool() -> Any:

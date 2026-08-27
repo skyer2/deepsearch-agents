@@ -20,7 +20,7 @@ TOOL_STEP_POLICY: dict[str, dict[str, Any]] = {
     "internet_search": {
         "server": "tavily-mcp",
         "module": TAVILY_SERVER_MODULE,
-        "step_types": ["network_search"],
+        "step_types": ["network_search", "research"],
         "permissions": ["search", "read"],
     },
     "list_sql_tables": {

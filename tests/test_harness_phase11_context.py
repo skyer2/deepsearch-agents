@@ -6,16 +6,29 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from app.agent.harness.token_counter import TokenCounter, estimate_glm_tokens
 from app.agent.harness.context_budget import (
     ContextBuildSettings,
-    estimate_tokens,
-    trim_text_to_token_budget,
     wrap_untrusted_block,
 )
 from app.agent.harness.context_builder import ContextBuilder
 from app.agent.harness.compressor import ContextCompressor
 from app.agent.harness.state import ExecutionPlan, LoopState, PlanStep, StepResult, TaskIntent
 from app.config.loader import reload_harness_config
+
+
+def test_glm_tokenizer_counts_chinese_near_one_to_one():
+    zh = "汉字" * 100
+    en = "abcd" * 100
+    glm = TokenCounter("glm-5.2")
+    zh_tokens = glm.count(zh)
+    en_tokens = glm.count(en)
+    assert 180 <= zh_tokens <= 230, zh_tokens
+    assert 80 <= en_tokens <= 140, en_tokens
+    assert estimate_glm_tokens(zh) == zh_tokens
+    # len/4 会把 200 汉字估成 50，明显低估
+    assert zh_tokens > len(zh) // 4
+    print("[OK] glm tokenizer")
 
 
 def test_wrap_untrusted():
@@ -79,13 +92,15 @@ def test_compressor_threshold():
 
 def test_config_phase11():
     cfg = reload_harness_config()
-    assert cfg.context_max_step_message_tokens == 12000
+    assert cfg.context_max_step_message_tokens == 16000
     assert cfg.compression_threshold_chars == 2000
     assert cfg.context_wrap_untrusted_external is True
+    assert cfg.token_budget_model == "glm-5.2"
     print("[OK] config phase11")
 
 
 if __name__ == "__main__":
+    test_glm_tokenizer_counts_chinese_near_one_to_one()
     test_wrap_untrusted()
     test_prior_results_max_steps()
     test_step_message_budget_metrics()

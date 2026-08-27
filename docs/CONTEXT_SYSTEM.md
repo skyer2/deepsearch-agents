@@ -3,7 +3,8 @@
 > 对照 `app/agent/harness/context_builder.py`、`compressor.py`、`context_budget.py`、`citations.py`、`orchestration.py`、`loop.py`。
 > 面试精简版与问题清单见 [CONTEXT_INTERVIEW.md](./CONTEXT_INTERVIEW.md)。
 > Phase 19 七项改进对照见 [CONTEXT_IMPROVEMENTS.md](./CONTEXT_IMPROVEMENTS.md)。
-> 长期记忆是另一套系统，见 [MEMORY_SYSTEM.md](./MEMORY_SYSTEM.md)。**压缩 ≠ Memory。**
+> Phase 23：Context Virtualization — Artifact/Evidence Store + 可恢复压缩 + glm-5.2 tokenizer + JIT。
+> 原则：**LLM context 只保存当前决策真正需要的信息**；可重新取得的大内容放窗口外，用 ref 按需读取。
 
 ---
 
@@ -11,13 +12,16 @@
 
 ### 1.1 一句话定位
 
-上下文工程不是「把能塞的都塞进 prompt」。研搜任务会搜很多页、查库、读知识库，原文全进下一步会爆窗，压缩太狠会丢来源，报告就会编。本仓把这件事做成 **Harness 显式阶段**：每步执行完压缩并登记引用，下一步按「这一步需要什么」拼分层 user message，超预算再截断。
+上下文工程不是「把能塞的都塞进 prompt」。研搜任务会搜很多页、查库、读知识库，原文全进下一步会爆窗，压缩太狠会丢来源，报告就会编。本仓把这件事做成 **Harness 显式阶段**：工具结果先落入 Artifact Store，压缩只生成带 `artifact_id` 的摘要；下一步由 Context Selector 按 Brief / 当前任务 JIT 取出最小高信号集合。
 
 和 Memory 的分工：
 
 ```text
-压缩 / 上下文工程   →  撑住「这一次任务」的窗口和证据
-长期 Memory         →  撑住「下一次任务」还能用的结论
+LLM Context        →  这一次 inference 的 L1（最小高信号）
+Working Notes      →  热工作集
+Evidence Store     →  claim 对应的可回读 span
+Artifact Store     →  网页/SQL/文件原文
+长期 Memory         →  跨任务精炼结论
 ```
 
 ### 1.2 研搜为什么必须做（优先级）

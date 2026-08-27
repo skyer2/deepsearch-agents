@@ -57,6 +57,7 @@ harness = AgentHarness(
         retention_check=harness_config.compression_retention_check,
         min_url_retention=harness_config.compression_retention_min_url,
         min_number_retention=harness_config.compression_retention_min_number,
+        reversible=getattr(harness_config, "context_reversible_compression", True),
     ),
     memory=memory_store,
     memory_extractor=memory_extractor,

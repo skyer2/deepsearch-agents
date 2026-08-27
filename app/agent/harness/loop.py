@@ -37,6 +37,10 @@ from app.agent.harness.working_notes import render_working_notes, write_working_
 from app.agent.harness.citations import CitationManager
 from app.agent.harness.compressor import ContextCompressor
 from app.agent.harness.context_builder import ContextBuilder
+from app.agent.harness.artifacts import ArtifactStore, get_artifact_store, set_artifact_store, reset_artifact_store
+from app.agent.harness.evidence_store import EvidenceStore, get_evidence_store, set_evidence_store, reset_evidence_store
+from app.agent.harness.research_brief import compile_research_brief
+from app.agent.harness.worker_profiles import resolve_worker_profile
 from app.agent.harness.hitl import hitl_coordinator
 from app.agent.harness.planner import (
     apply_intent_clarification,
@@ -156,6 +160,7 @@ class AgentHarness:
             retention_check=self.harness_config.compression_retention_check,
             min_url_retention=self.harness_config.compression_retention_min_url,
             min_number_retention=self.harness_config.compression_retention_min_number,
+            reversible=getattr(self.harness_config, "context_reversible_compression", True),
         )
         self.context_builder = context_builder or ContextBuilder.from_harness_config()
         self.memory = memory or MemoryStore()
@@ -170,11 +175,13 @@ class AgentHarness:
         self._current_trace_id: str = ""
 
     def _agent_for_step(self, step: PlanStep) -> tuple[Any, str]:
+        profile = resolve_worker_profile(step.step_type, step.allowed_tools)
         return resolve_execute_target(
             step.step_type,
             workers=self.workers,
             main_agent=self.agent,
             direct_invoke=getattr(self.harness_config, "direct_worker_invoke", True),
+            profile=profile,
         )
 
     def _action_idem_key(self, state: LoopState, step: PlanStep, step_index: int) -> str:
@@ -221,6 +228,14 @@ class AgentHarness:
     ) -> None:
         sources = citation_manager.sources if citation_manager is not None else []
         query = task_query or (state.intent.raw_query if state.intent else "")
+        if state.intent and (state.plan or query):
+            state.research_brief_obj = compile_research_brief(
+                task_query=query,
+                intent=state.intent,
+                plan_brief=getattr(state.plan, "research_brief", "") if state.plan else "",
+            )
+            if state.plan and not state.plan.research_brief:
+                state.plan.research_brief = state.research_brief_obj.objective
         if self.harness_config.context_working_notes_enabled:
             state.working_notes = render_working_notes(
                 task_query=query,
@@ -240,6 +255,12 @@ class AgentHarness:
                     citation_manager.save_evidence_json(session_dir)
                 except Exception as exc:
                     print(f"[Context] evidence.json write skipped: {exc}")
+        try:
+            get_artifact_store().persist(session_dir)
+            get_evidence_store().persist(session_dir)
+            state.obs_artifacts_stored = len(get_artifact_store())
+        except Exception as exc:
+            print(f"[Context] artifact/evidence persist skipped: {exc}")
 
     async def _hygiene_checkpoint_messages(
         self,
@@ -301,6 +322,12 @@ class AgentHarness:
             project_id=project_id,
         )
         identity_token = set_memory_identity(identity)
+        artifact_store = ArtifactStore(session_dir)
+        artifact_store.load(session_dir)
+        evidence_store = EvidenceStore(session_dir)
+        evidence_store.load(session_dir)
+        set_artifact_store(artifact_store)
+        set_evidence_store(evidence_store)
         state.memory_user_id = identity.user_id
         state.memory_tenant_id = identity.tenant_id
         state.memory_project_id = identity.project_id
@@ -350,6 +377,8 @@ class AgentHarness:
         self._current_tracer = None
         self._run_checkpoint_store = None
         self._run_citation_manager = None
+        reset_artifact_store()
+        reset_evidence_store()
         reset_session_context(ctx.tokens[0], ctx.tokens[1])
         reset_memory_identity(ctx.identity_token)
 
@@ -1011,6 +1040,7 @@ class AgentHarness:
             subagent=step.subagent or "",
         )
         attach_structured_payload(result, payload)
+        self._ingest_evidence(step, result, payload, state)
 
         struct_ok, struct_reason = validate_structured_worker_payload(
             payload,
@@ -1057,6 +1087,56 @@ class AgentHarness:
             state.obs_unauthorized_tool_hits += len(unauthorized)
             state.obs_orchestration_violations += 1
         return result
+
+    def _ingest_evidence(
+        self,
+        step: PlanStep,
+        result: StepResult,
+        payload: Any,
+        state: LoopState,
+    ) -> None:
+        store = get_evidence_store()
+        artifacts = get_artifact_store()
+        artifact_ids = list(getattr(payload, "artifact_ids", None) or [])
+        meta = result.metadata or {}
+        if meta.get("artifact_id"):
+            artifact_ids.append(str(meta["artifact_id"]))
+        payload_dict = {
+            "facts": list(getattr(payload, "facts", None) or []),
+            "sources": list(getattr(payload, "sources", None) or []),
+            "findings": list(getattr(payload, "findings", None) or []),
+            "conflicts": list(getattr(payload, "conflicts", None) or []),
+            "confidence": getattr(payload, "confidence", 1.0),
+            "evidence_ids": list(getattr(payload, "evidence_ids", None) or []),
+        }
+        step_index = int(meta.get("step_index") or state.step_index or 0)
+        findings = store.ingest_worker_payload(
+            payload_dict,
+            artifact_ids=artifact_ids,
+            step_index=step_index,
+            step_type=step.step_type,
+            artifact_store=artifacts,
+        )
+        eids = []
+        for finding in findings:
+            eids.extend(list(finding.evidence_ids or []))
+        payload.evidence_ids = list(dict.fromkeys(list(payload.evidence_ids or []) + eids))
+        payload.findings = [finding.to_dict() for finding in findings] or payload.findings
+        attach_structured_payload(result, payload)
+        if self._run_citation_manager is not None and eids:
+            already = {
+                str(getattr(src, "evidence_id", "") or "")
+                for src in self._run_citation_manager.sources
+            }
+            new_spans = [
+                store.spans[eid]
+                for eid in eids
+                if eid in store.spans and eid not in already
+            ]
+            if new_spans:
+                self._run_citation_manager.bind_evidence_spans(new_spans, findings)
+        state.obs_evidence_used_count = len(store.findings)
+        state.obs_artifacts_stored = len(artifacts)
 
     def _checkpoint_matches(self, data: dict[str, Any] | None, state: LoopState) -> bool:
         if not data:
@@ -1778,6 +1858,10 @@ class AgentHarness:
             )
             if step_ctx_metrics.layers.get("budget_trimmed") or step_ctx_metrics.evictions:
                 state.obs_context_budget_trims += 1
+            state.obs_evidence_retrieved_count = max(
+                state.obs_evidence_retrieved_count,
+                int(getattr(step_ctx_metrics, "evidence_retrieved_count", 0) or 0),
+            )
             self._report_phase(
                 Phase.EXECUTE,
                 "context_built",
@@ -2122,7 +2206,11 @@ class AgentHarness:
             result.content,
             result.step_type,
             source_metadata=source_meta,
+            artifact_store=get_artifact_store(),
         )
+        if meta.get("artifact_id"):
+            result.metadata["artifact_id"] = meta["artifact_id"]
+            source_meta["artifact_id"] = meta["artifact_id"]
         result.compressed_content = compressed
         result.metadata.update(meta)
         ratio = meta.get("compression_ratio")
@@ -2132,7 +2220,9 @@ class AgentHarness:
             compressed_chars = int(meta.get("compressed_chars") or 0)
             if original_chars > compressed_chars > 0:
                 state.obs_estimated_tokens_saved += max(
-                    1, (original_chars - compressed_chars) // 4
+                    1,
+                    self.compressor.estimate_tokens(result.content)
+                    - self.compressor.estimate_tokens(compressed),
                 )
         retention = meta.get("entity_retention")
         if isinstance(retention, (int, float)):
@@ -2305,6 +2395,12 @@ class AgentHarness:
         from app.agent.harness.usage_tracker import get_usage_tracker
 
         usage_summary = get_usage_tracker().session_summary(state.session_id)
+        try:
+            state.obs_cache_read_tokens = int(
+                (usage_summary.get("total") or {}).get("cache_read_tokens") or 0
+            )
+        except (TypeError, ValueError):
+            state.obs_cache_read_tokens = 0
         result = HarnessResult(
             session_id=state.session_id,
             status=status,
@@ -2349,6 +2445,15 @@ class AgentHarness:
                 "graph_thread_ids": list(state.graph_thread_ids),
                 "hallucination_rate": state.hallucination_rate,
                 "evidence_source_count": state.evidence_source_count,
+                "evidence_retrieved_count": getattr(state, "obs_evidence_retrieved_count", 0),
+                "evidence_used_count": getattr(state, "obs_evidence_used_count", 0),
+                "artifacts_stored": getattr(state, "obs_artifacts_stored", 0),
+                "cache_read_tokens": getattr(state, "obs_cache_read_tokens", 0),
+                "token_budget": {
+                    "model": getattr(self.harness_config, "token_budget_model", "glm-5.2"),
+                    "context_window": getattr(self.harness_config, "token_context_window", 128000),
+                    "stages": dict(getattr(self.harness_config, "token_stage_budgets", None) or {}),
+                },
                 "resumed_from_checkpoint": state.resumed_from_checkpoint,
                 "completed_step_keys": state.completed_step_keys,
                 "abort_reason": state.abort_reason,
