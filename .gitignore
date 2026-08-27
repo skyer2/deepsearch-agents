@@ -66,6 +66,8 @@ npm-debug.log
 yarn-error.log
 testem.log
 /typings
+mcp_data/
+output/
 
 # System Files
 .DS_Store

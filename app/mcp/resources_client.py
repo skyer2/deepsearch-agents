@@ -7,18 +7,29 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from app.mcp.policy_context import get_tool_call_context
 from app.mcp.registry_sync import SERVER_MODULES_BY_ID
+from app.mcp.resource_acl import authorize_session_uri
 from app.mcp.session_pool import MCPSessionPool, use_session_pool
 
 
 def list_session_resource_uris(session_id: str, session_dir: Optional[str] = None) -> list[str]:
+    ctx = get_tool_call_context()
+    if ctx and ctx.session_id and session_id and session_id != ctx.session_id:
+        return []
     root = Path(session_dir) if session_dir else None
     if root is None or not root.exists():
         return []
     uris: list[str] = []
     for path in sorted(root.iterdir()):
         if path.is_file() and path.suffix.lower() in {".md", ".txt", ".pdf"}:
-            uris.append(f"session://{session_id}/{path.name}")
+            uri = f"session://{session_id}/{path.name}"
+            if ctx:
+                try:
+                    authorize_session_uri(uri, ctx)
+                except PermissionError:
+                    continue
+            uris.append(uri)
     return uris
 
 

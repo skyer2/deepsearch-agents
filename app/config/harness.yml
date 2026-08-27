@@ -114,20 +114,31 @@ harness:
     mysql_enabled: false
     ragflow_enabled: false
     files_enabled: false         # 会话文件 Resources + 异步 PDF
-    transport: "stdio"            # 预留 streamable-http
+    transport: "stdio"            # local/dev=stdio；生产=streamable-http（2026-07-28 stateless）
     pool_enabled: true            # 【Phase 16】常驻连接池，避免每次起子进程
+    pool_size: 3                  # 同 server 并发 worker 数，避免 fan-out 被串行化
+    queue_limit: 32               # 单 worker 队列上限，超限 backpressure
     sync_on_startup: true         # 【Phase 16】list_tools 同步 Registry schema
-    tasks_enabled: true           # 【Phase 16】长任务 MCP Tasks + Harness 轮询
+    tasks_enabled: true           # durable MCP Tasks + tasks/get 轮询
     call_timeout_sec: 30
     max_retries: 1
+    require_auth: false           # 生产打开：OIDC principal → MCP access token
+    oauth_audience: "https://mcp.local/gateway"
+    oauth_issuer: "deepsearch-harness"
+    breaker_failure_threshold: 5
+    breaker_reset_sec: 30
     gateway_rate_limit_per_minute: 120
-    gateway_oauth_token: ""       # 非空时要求 HARNESS_MCP_GATEWAY_TOKEN 匹配
+    gateway_oauth_token: ""       # 仅作 HMAC secret 回退，不再自校验 caller identity
 
-  # 【Phase 10】工具网关 — fail-closed + SQL 白名单（LangChain/MCP 共用 db_core）
+  # 【Phase 10/25】工具网关 — fail-closed + SQL 数据访问护栏（LangChain/MCP 共用 db_core）
   tools:
     fail_closed: true
     sql_select_only: true
     enforce_step_policy: true    # Registry 步级工具白名单（文档+Gateway 校验）
+    sql_max_rows: 200
+    sql_max_bytes: 262144
+    sql_timeout_ms: 5000
+    sql_table_allowlist: []      # 空=开发态全表；生产必须显式表白名单
 
   hitl:
     enabled: true
