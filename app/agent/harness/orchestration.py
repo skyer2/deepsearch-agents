@@ -51,13 +51,33 @@ class WorkerResultPayload:
     error_code: str = ""
     worker: str = ""
     step_type: str = ""
+    findings: list[dict[str, Any]] = field(default_factory=list)
+    gaps: list[str] = field(default_factory=list)
+    conflicts: list[str] = field(default_factory=list)
+    suggested_followups: list[str] = field(default_factory=list)
+    evidence_ids: list[str] = field(default_factory=list)
+    artifact_ids: list[str] = field(default_factory=list)
 
     def to_context_snippet(self, max_chars: int = 600) -> str:
         parts = [self.summary or ""]
-        if self.facts:
+        if self.findings:
+            claims = []
+            for item in self.findings[:5]:
+                if isinstance(item, dict):
+                    claims.append(str(item.get("claim") or ""))
+                else:
+                    claims.append(str(item))
+            parts.append("主张: " + "; ".join(c for c in claims if c))
+        elif self.facts:
             parts.append("要点: " + "; ".join(self.facts[:5]))
+        if self.evidence_ids:
+            parts.append("evidence: " + ", ".join(self.evidence_ids[:8]))
         if self.sources:
             parts.append("来源: " + ", ".join(self.sources[:5]))
+        if self.gaps:
+            parts.append("缺口: " + "; ".join(self.gaps[:3]))
+        if self.conflicts:
+            parts.append("冲突: " + "; ".join(self.conflicts[:3]))
         if not self.ok and self.error_code:
             parts.append(f"[{self.error_code}]")
         text = " | ".join(p for p in parts if p.strip())
@@ -147,15 +167,25 @@ def parse_worker_payload(
 
     json_blob = _extract_json_object(text)
     if json_blob is not None:
+        facts = [str(f) for f in json_blob.get("facts", []) if f][:10]
+        findings = _normalize_findings(json_blob.get("findings"), facts)
+        if findings and not facts:
+            facts = [str(item.get("claim") or "") for item in findings if item.get("claim")][:10]
         return WorkerResultPayload(
             ok=bool(json_blob.get("ok", True)),
             summary=str(json_blob.get("summary", text))[:4000],
-            facts=[str(f) for f in json_blob.get("facts", []) if f][:10],
+            facts=facts,
             sources=[str(s) for s in json_blob.get("sources", []) if s][:10],
             confidence=float(json_blob.get("confidence", 1.0) or 1.0),
             error_code=str(json_blob.get("error_code", "")),
             worker=str(json_blob.get("worker", subagent)),
             step_type=str(json_blob.get("step_type", step_type)),
+            findings=findings,
+            gaps=[str(x) for x in (json_blob.get("gaps") or []) if x][:8],
+            conflicts=[_conflict_text(x) for x in (json_blob.get("conflicts") or []) if x][:8],
+            suggested_followups=[str(x) for x in (json_blob.get("suggested_followups") or []) if x][:6],
+            evidence_ids=[str(x) for x in (json_blob.get("evidence_ids") or []) if x][:20],
+            artifact_ids=[str(x) for x in (json_blob.get("artifact_ids") or []) if x][:20],
         )
 
     return WorkerResultPayload(
@@ -193,7 +223,7 @@ def validate_structured_worker_payload(
         return False, "empty_worker_result"
     if not require_json:
         return True, ""
-    if payload.facts or payload.sources:
+    if payload.facts or payload.sources or payload.findings:
         return True, ""
     return False, "invalid_structured_output"
 
@@ -225,6 +255,8 @@ def aggregate_evidence_digest(step_results: list[StepResult]) -> dict[str, Any]:
             continue
         step_facts = [str(f) for f in payload.get("facts", []) if f]
         step_sources = [str(s) for s in payload.get("sources", []) if s]
+        step_findings = [item for item in (payload.get("findings") or []) if item]
+        step_eids = [str(x) for x in (payload.get("evidence_ids") or []) if x]
         summary = str(payload.get("summary", ""))
         facts_by_step.append(
             {
@@ -233,6 +265,8 @@ def aggregate_evidence_digest(step_results: list[StepResult]) -> dict[str, Any]:
                 "summary": summary[:800],
                 "facts": step_facts[:10],
                 "sources": step_sources[:10],
+                "findings": step_findings[:10],
+                "evidence_ids": step_eids[:12],
                 "confidence": payload.get("confidence", 1.0),
             }
         )
@@ -255,22 +289,40 @@ def aggregate_evidence_digest(step_results: list[StepResult]) -> dict[str, Any]:
     }
 
 
-def format_evidence_digest_for_prompt(digest: dict[str, Any]) -> str:
-    """格式化为写报告/汇总步骤的上下文块。"""
+def format_evidence_digest_for_prompt(
+    digest: dict[str, Any],
+    *,
+    max_steps: int = 12,
+) -> str:
+    """格式化为写报告/汇总步骤的上下文块。超长时按步截断，引导 JIT 回读。"""
     if not digest.get("facts_by_step"):
         return ""
-    lines = ["    【多源证据_digest — 写报告必须引用】"]
-    for block in digest["facts_by_step"]:
+    blocks = list(digest["facts_by_step"] or [])
+    truncated = 0
+    if max_steps > 0 and len(blocks) > max_steps:
+        truncated = len(blocks) - max_steps
+        blocks = blocks[-max_steps:]
+    lines = ["    【多源证据_digest — 写报告必须引用 evidence_id / [n]】"]
+    if truncated:
+        lines.append(f"    （仅最近 {max_steps} 步证据卡，省略 {truncated} 步；其余 read_evidence）")
+    for block in blocks:
         lines.append(
             f"  步骤{block['step_index']} [{block['step_type']}] "
             f"confidence={block.get('confidence', 1.0)}"
         )
         if block.get("summary"):
             lines.append(f"    摘要: {block['summary'][:400]}")
+        for item in block.get("findings") or []:
+            if isinstance(item, dict):
+                claim = item.get("claim") or ""
+                eids = ",".join(str(x) for x in (item.get("evidence_ids") or [])[:4])
+                lines.append(f"    - 主张: {claim} evidence=[{eids or '-'}]")
         for fact in block.get("facts") or []:
             lines.append(f"    - 事实: {fact}")
         for src in block.get("sources") or []:
             lines.append(f"    - 来源: {src}")
+        for eid in block.get("evidence_ids") or []:
+            lines.append(f"    - evidence_id: {eid}")
     if digest.get("all_facts"):
         lines.append("    【合并事实清单】")
         for fact in digest["all_facts"][:25]:
@@ -323,11 +375,20 @@ def build_worker_output_instruction(step: PlanStep) -> str:
       "summary": "本步结论摘要",
       "facts": ["关键事实1", "关键事实2"],
       "sources": ["URL或表名或文件名"],
+      "findings": [
+        {{"claim": "可核对的主张", "evidence_ids": ["E1"], "confidence": 0.8}}
+      ],
+      "gaps": ["尚未覆盖的问题"],
+      "conflicts": ["来源冲突描述"],
+      "suggested_followups": [],
+      "evidence_ids": ["E1"],
+      "artifact_ids": ["art-web-1"],
       "confidence": 0.0到1.0,
       "error_code": "",
       "worker": "{worker}",
       "step_type": "{step.step_type}"
     }}
+    主张必须绑定 evidence_ids；不要把网页全文贴回 JSON。
     若失败：ok=false，并填写 error_code（如 search_empty / sql_empty / timeout）。
     """
 
@@ -417,6 +478,37 @@ class IdempotencyRegistry:
         keys = data.get("completed_step_keys") or []
         for key, result in zip(keys, results):
             self._completed[key] = result
+
+
+def _normalize_findings(raw: Any, facts: list[str]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    if isinstance(raw, list):
+        for i, item in enumerate(raw[:20]):
+            if isinstance(item, str) and item.strip():
+                items.append({"claim_id": f"C{i+1}", "claim": item.strip(), "evidence_ids": []})
+            elif isinstance(item, dict) and (item.get("claim") or item.get("text")):
+                claim = str(item.get("claim") or item.get("text") or "").strip()
+                items.append(
+                    {
+                        "claim_id": str(item.get("claim_id") or f"C{i+1}"),
+                        "claim": claim,
+                        "evidence_ids": [str(x) for x in (item.get("evidence_ids") or []) if x],
+                        "confidence": float(item.get("confidence") or 1.0),
+                        "source_quality": str(item.get("source_quality") or "unknown"),
+                    }
+                )
+    if not items and facts:
+        items = [
+            {"claim_id": f"C{i+1}", "claim": fact, "evidence_ids": []}
+            for i, fact in enumerate(facts[:10])
+        ]
+    return items
+
+
+def _conflict_text(item: Any) -> str:
+    if isinstance(item, dict):
+        return str(item.get("text") or item.get("claim") or item)
+    return str(item)
 
 
 def apply_step_status(plan: ExecutionPlan, completed_count: int) -> None:

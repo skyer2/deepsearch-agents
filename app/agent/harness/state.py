@@ -274,10 +274,16 @@ class LoopState:
     working_notes: str = ""
     evidence_lookup_block: str = ""
     evidence_lookup: list[Any] = field(default_factory=list)
+    research_brief_obj: Any = None
     obs_entity_retention_rates: list[float] = field(default_factory=list)
     obs_retention_patches: int = 0
     obs_fresh_threads: int = 0
     obs_tool_results_cleared: int = 0
+    obs_evidence_retrieved_count: int = 0
+    obs_evidence_used_count: int = 0
+    obs_artifacts_stored: int = 0
+    obs_cache_read_tokens: int = 0
+    obs_context_efficiency: float = 0.0
     graph_thread_ids: list[str] = field(default_factory=list)
     numeric_citation_coverage: float = 0.0
     obs_memory_recalled_count: int = 0

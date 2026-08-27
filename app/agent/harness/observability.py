@@ -36,6 +36,10 @@ class RunObservabilitySnapshot:
     tool_results_cleared: int = 0
     memory_recalled_count: int = 0
     memory_saved_count: int = 0
+    evidence_retrieved_count: int = 0
+    evidence_used_count: int = 0
+    artifacts_stored: int = 0
+    cache_read_tokens: int = 0
 
     @property
     def structured_output_compliance_rate(self) -> float | None:
@@ -85,4 +89,8 @@ def build_observability_snapshot(state: "LoopState") -> RunObservabilitySnapshot
         tool_results_cleared=getattr(state, "obs_tool_results_cleared", 0),
         memory_recalled_count=state.obs_memory_recalled_count,
         memory_saved_count=state.obs_memory_saved_count,
+        evidence_retrieved_count=getattr(state, "obs_evidence_retrieved_count", 0),
+        evidence_used_count=getattr(state, "obs_evidence_used_count", 0),
+        artifacts_stored=getattr(state, "obs_artifacts_stored", 0),
+        cache_read_tokens=getattr(state, "obs_cache_read_tokens", 0),
     )

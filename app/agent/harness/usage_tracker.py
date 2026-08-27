@@ -43,6 +43,8 @@ def get_llm_session() -> str:
 DEFAULT_PRICING = {
     "qwen-max": {"input": 1.6, "output": 6.4},
     "qwen-turbo": {"input": 0.3, "output": 0.6},
+    "glm-5.2": {"input": 0.8, "output": 2.0},
+    "glm-4": {"input": 0.5, "output": 1.5},
     "default": {"input": 1.0, "output": 2.0},
 }
 
@@ -76,6 +78,23 @@ def get_pricing(model_name: str) -> dict[str, float]:
     return pricing.get("default") or {"input": 1.0, "output": 2.0}
 
 
+def _extract_cached_tokens(usage: dict[str, Any]) -> int:
+    """OpenAI prompt_tokens_details.cached_tokens / 智谱 cached_tokens。"""
+    details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details") or {}
+    if isinstance(details, dict) and details.get("cached_tokens") is not None:
+        try:
+            return int(details.get("cached_tokens") or 0)
+        except (TypeError, ValueError):
+            return 0
+    for key in ("cached_tokens", "cache_read_tokens", "prompt_cache_hit_tokens"):
+        if usage.get(key) is not None:
+            try:
+                return int(usage.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0
+    return 0
+
+
 def estimate_cost_usd(
     model_name: str,
     prompt_tokens: int,
@@ -97,6 +116,7 @@ class LLMCallRecord:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    cache_read_tokens: int = 0
     cost_usd: float = 0.0
     run_id: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
@@ -147,9 +167,11 @@ class UsageTracker:
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "total_tokens": 0,
+            "cache_read_tokens": 0,
             "cost_usd": 0.0,
             "calls": 0,
             "missing_usage_calls": 0,
+            "cache_hit_ratio": 0.0,
         }
         for rec in records:
             bucket = by_phase.setdefault(
@@ -158,12 +180,19 @@ class UsageTracker:
                     "prompt_tokens": 0,
                     "completion_tokens": 0,
                     "total_tokens": 0,
+                    "cache_read_tokens": 0,
                     "cost_usd": 0.0,
                     "calls": 0,
                     "missing_usage_calls": 0,
                 },
             )
-            for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cost_usd"):
+            for key in (
+                "prompt_tokens",
+                "completion_tokens",
+                "total_tokens",
+                "cache_read_tokens",
+                "cost_usd",
+            ):
                 bucket[key] += getattr(rec, key)
                 total[key] += getattr(rec, key)
             bucket["calls"] += 1
@@ -171,6 +200,9 @@ class UsageTracker:
             if rec.extra.get("usage_missing"):
                 bucket["missing_usage_calls"] += 1
                 total["missing_usage_calls"] += 1
+        prompt = int(total["prompt_tokens"] or 0)
+        cached = int(total["cache_read_tokens"] or 0)
+        total["cache_hit_ratio"] = round(cached / prompt, 4) if prompt else 0.0
         return {
             "session_id": session_id,
             "by_phase": by_phase,
@@ -215,6 +247,7 @@ class UsageTrackingCallback(BaseCallbackHandler):
         prompt_tokens = 0
         completion_tokens = 0
         total_tokens = 0
+        cache_read_tokens = 0
         model_name = "unknown"
 
         llm_output = getattr(response, "llm_output", None) or {}
@@ -233,6 +266,7 @@ class UsageTrackingCallback(BaseCallbackHandler):
                     or 0
                 )
                 total_tokens = int(token_usage.get("total_tokens") or 0)
+                cache_read_tokens = _extract_cached_tokens(token_usage)
 
         # OpenAI 兼容层有时把 usage 放在 generations[0].message.usage_metadata
         if total_tokens == 0:
@@ -270,6 +304,7 @@ class UsageTrackingCallback(BaseCallbackHandler):
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
+            cache_read_tokens=cache_read_tokens,
             cost_usd=cost,
             run_id=str(kwargs.get("run_id") or ""),
             extra={"usage_missing": usage_missing},

@@ -54,24 +54,21 @@ class WorkerRegistry:
 
 
 def worker_tools_for_step(step_type: str) -> list[str]:
-    return {
-        "network_search": ["internet_search"],
-        "database_query": ["list_sql_tables", "get_table_data", "execute_sql_query"],
-        "knowledge_base": ["get_assistant_list", "create_ask_delete"],
-        "file_read": ["read_file_content"],
-        "research": [
-            "internet_search",
-            "list_sql_tables",
-            "get_table_data",
-            "execute_sql_query",
-            "get_assistant_list",
-            "create_ask_delete",
-            "read_file_content",
-        ],
-        "generate_markdown": ["generate_markdown", "read_file_content"],
-        "convert_pdf": ["convert_md_to_pdf", "generate_markdown", "read_file_content"],
-        "summarize": ["generate_markdown", "read_file_content"],
-    }.get(step_type, [])
+    from app.agent.harness.worker_profiles import CONTEXT_TOOLS, resolve_worker_profile, tools_for_profile
+
+    profile = resolve_worker_profile(step_type)
+    tools = tools_for_profile(profile)
+    extras = {
+        "network_search": ["internet_search", *CONTEXT_TOOLS],
+        "database_query": ["list_sql_tables", "get_table_data", "execute_sql_query", *CONTEXT_TOOLS],
+        "knowledge_base": ["get_assistant_list", "create_ask_delete", *CONTEXT_TOOLS],
+        "file_read": ["read_file_content", *CONTEXT_TOOLS],
+        "research": tools,
+        "generate_markdown": ["generate_markdown", "read_file_content", *CONTEXT_TOOLS],
+        "convert_pdf": ["convert_md_to_pdf", "generate_markdown", "read_file_content", *CONTEXT_TOOLS],
+        "summarize": ["generate_markdown", "read_file_content", *CONTEXT_TOOLS],
+    }
+    return list(dict.fromkeys(extras.get(step_type, tools)))
 
 
 def resolve_execute_target(
@@ -80,14 +77,18 @@ def resolve_execute_target(
     workers: dict[str, Any] | None,
     main_agent: Any = None,
     direct_invoke: bool = True,
+    profile: str = "",
 ) -> tuple[Any, str]:
     """计划指定谁干就调谁。未注册 step 默认 fail-closed，禁止落到合成工人。"""
     if not direct_invoke:
         if main_agent is not None:
             return main_agent, "main"
         raise UnsupportedTaskType(step_type)
-    if workers and workers.get(step_type) is not None:
-        return workers[step_type], "direct"
+    if workers:
+        if profile and workers.get(profile) is not None:
+            return workers[profile], "direct"
+        if workers.get(step_type) is not None:
+            return workers[step_type], "direct"
     raise UnsupportedTaskType(step_type)
 
 
@@ -114,6 +115,16 @@ def build_worker_registry(
     from app.mcp.client import get_db_tools, get_internet_search_tool, get_ragflow_tools
     from app.research.workers.factory import create_research_worker, create_synthesis_worker
     from app.research.workers.prompts import RESEARCH_TASK_SYSTEM_PROMPT, SYNTHESIS_SYSTEM_PROMPT
+    from app.agent.harness.tool_contract import wrap_tool_with_contract
+    from app.agent.harness.worker_profiles import (
+        PROFILE_DB,
+        PROFILE_FILE,
+        PROFILE_KB,
+        PROFILE_MIXED,
+        PROFILE_WEB,
+        filter_tools_for_profile,
+    )
+    from app.tools.artifact_tools import read_artifact, read_evidence
 
     kind_map = dict(STEP_KINDS)
     if kinds:
@@ -160,6 +171,23 @@ def build_worker_registry(
     net_tools = [net_tool] if net_tool is not None else [t for t in (net.get("tools") or []) if t]
     db_tools = [t for t in (get_db_tools() or []) if t] or [t for t in (db.get("tools") or []) if t]
     kb_tools = [t for t in (get_ragflow_tools() or []) if t] or [t for t in (kb.get("tools") or []) if t]
+    context_tools = [read_artifact, read_evidence]
+
+    def _contract(tools: list[Any], step_type: str) -> list[Any]:
+        wrapped: list[Any] = []
+        for tool in tools:
+            if tool is None:
+                continue
+            name = getattr(tool, "name", "")
+            if name in {"read_artifact", "read_evidence"}:
+                wrapped.append(tool)
+            else:
+                wrapped.append(wrap_tool_with_contract(tool, tool_name=name, step_type=step_type))
+        return wrapped
+
+    net_tools = _contract(net_tools, "network_search") + context_tools
+    db_tools = _contract(db_tools, "database_query") + context_tools
+    kb_tools = _contract(kb_tools, "knowledge_base") + context_tools
 
     registry.register(
         "network_search",
@@ -177,17 +205,43 @@ def build_worker_registry(
     for tool in [*net_tools, *db_tools, *kb_tools]:
         if tool is not None and tool not in research_tools:
             research_tools.append(tool)
+    mixed_tools = filter_tools_for_profile(research_tools, PROFILE_MIXED) or research_tools
     registry.register(
         "research",
-        _maybe_deep("research", research_tools, RESEARCH_TASK_SYSTEM_PROMPT),
+        _maybe_deep("research", mixed_tools, RESEARCH_TASK_SYSTEM_PROMPT),
+    )
+    registry.register(
+        PROFILE_WEB,
+        _maybe_deep("network_search", net_tools, str(net.get("system_prompt") or "")),
+    )
+    registry.register(
+        PROFILE_DB,
+        _maybe_deep("database_query", db_tools, str(db.get("system_prompt") or "")),
+    )
+    registry.register(
+        PROFILE_KB,
+        _maybe_deep("knowledge_base", kb_tools, str(kb.get("system_prompt") or "")),
+    )
+    registry.register(
+        PROFILE_MIXED,
+        _maybe_deep("research", mixed_tools, RESEARCH_TASK_SYSTEM_PROMPT),
     )
 
     read_tool = files.get("read_file_content")
     md_tool = files.get("generate_markdown")
     pdf_tool = files.get("convert_md_to_pdf")
-    read_tools = [read_tool] if read_tool else []
-    md_tools = [t for t in (md_tool, read_tool) if t]
-    pdf_tools = [t for t in (pdf_tool, md_tool, read_tool) if t]
+    read_tools = ([read_tool] if read_tool else []) + context_tools
+    md_tools = [t for t in (md_tool, read_tool) if t] + context_tools
+    pdf_tools = [t for t in (pdf_tool, md_tool, read_tool) if t] + context_tools
+    registry.register(
+        PROFILE_FILE,
+        _maybe_deep(
+            "file_read",
+            read_tools,
+            synthesis_prompt,
+            hitl_flags={"read_file_content": hitl.get("read_file_content", False)},
+        ),
+    )
 
     registry.register(
         "file_read",

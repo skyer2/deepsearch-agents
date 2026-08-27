@@ -198,6 +198,13 @@ async def collect_health() -> dict[str, Any]:
                 "evidence_lookup_enabled": config.context_evidence_lookup_enabled,
                 "clear_bulky_tool_results": config.context_clear_bulky_tool_results,
                 "retention_check": config.compression_retention_check,
+                "jit_retrieval_enabled": getattr(config, "context_jit_retrieval_enabled", True),
+                "research_brief_as_anchor": getattr(config, "context_research_brief_as_anchor", True),
+                "reversible_compression": getattr(config, "context_reversible_compression", True),
+                "tool_output_contract": getattr(config, "context_tool_output_contract", True),
+                "token_budget_model": getattr(config, "token_budget_model", "glm-5.2"),
+                "token_context_window": getattr(config, "token_context_window", 128000),
+                "token_stage_budgets": dict(getattr(config, "token_stage_budgets", None) or {}),
             },
             "memory": {
                 "enabled": config.memory_enabled,

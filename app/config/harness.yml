@@ -11,9 +11,9 @@ harness:
     retention_min_url: 0.8
     retention_min_number: 0.5
 
-  # 【Phase 11/19】上下文工程 — 分层预算 + 窗口卫生 + 证据回读
+  # 【Phase 11/19/23】上下文工程 — 分层预算 + JIT + 可恢复压缩
   context:
-    max_step_message_tokens: 12000   # 单步 user message token 上限（估算）
+    max_step_message_tokens: 16000   # researcher 回退上限；实际按 token_budget.stages
     prior_results_max_steps: 5       # 回灌最近 N 步摘要
     prior_snippet_max_chars: 400
     wrap_untrusted_external: true    # 检索结果用 <untrusted> 包裹
@@ -23,6 +23,25 @@ harness:
     working_notes_enabled: true      # 【Phase 19】抗压缩工作笔记
     evidence_lookup_enabled: true    # 【Phase 19】写报告可回读 evidence 摘录
     clear_bulky_tool_results: true   # 【Phase 19】HITL resume 前清除过长 tool_result
+    jit_retrieval_enabled: true      # 【Phase 23】Memory/Evidence 按当前任务检索，不再 eager 全塞
+    research_brief_as_anchor: true   # 【Phase 23】后续步骤以 Brief 为准
+    evidence_max_items: 12           # 合成步 JIT 证据上限
+    reversible_compression: true     # 摘要必带 artifact_id
+    tool_output_contract: true       # 工具返回短卡 + ref
+
+  # GLM-5.2 model-aware token 预算：窗口 - tools - output - safety = 动态上下文
+  token_budget:
+    model: "glm-5.2"
+    context_window: 128000
+    tool_schema_tokens: 4000
+    reserved_output_tokens: 8000
+    safety_margin: 2000
+    stages:
+      planner: 8000
+      researcher: 16000
+      synthesis: 40000
+      verifier: 12000
+      compress: 8000
 
   memory:
     provider: "sqlite"         # sqlite | local | mem0

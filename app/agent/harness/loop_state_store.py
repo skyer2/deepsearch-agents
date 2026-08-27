@@ -42,6 +42,10 @@ _OBS_INT_FIELDS = (
     "obs_memory_saved_count",
     "obs_memory_trust_filtered",
     "obs_memory_sources_recorded",
+    "obs_evidence_retrieved_count",
+    "obs_evidence_used_count",
+    "obs_artifacts_stored",
+    "obs_cache_read_tokens",
 )
 
 
@@ -141,6 +145,12 @@ def serialize_loop_state(state: LoopState) -> dict[str, Any]:
         "working_notes": state.working_notes,
         "evidence_lookup_block": state.evidence_lookup_block,
         "evidence_lookup": list(state.evidence_lookup or []),
+        "research_brief": (
+            state.research_brief_obj.to_dict()
+            if getattr(state, "research_brief_obj", None) is not None
+            and hasattr(state.research_brief_obj, "to_dict")
+            else None
+        ),
         "obs_entity_retention_rates": list(state.obs_entity_retention_rates),
         "graph_thread_ids": list(state.graph_thread_ids),
         "numeric_citation_coverage": state.numeric_citation_coverage,
@@ -233,6 +243,10 @@ def deserialize_loop_state(
     state.working_notes = str(payload.get("working_notes") or "")
     state.evidence_lookup_block = str(payload.get("evidence_lookup_block") or "")
     state.evidence_lookup = list(payload.get("evidence_lookup") or [])
+    if payload.get("research_brief"):
+        from app.agent.harness.research_brief import ResearchBrief
+
+        state.research_brief_obj = ResearchBrief.from_dict(payload.get("research_brief"))
     state.obs_entity_retention_rates = [
         float(x) for x in (payload.get("obs_entity_retention_rates") or [])
     ]

@@ -31,6 +31,10 @@ class EvidenceSource:
     excerpt: str
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     bound_fact: str = ""
+    artifact_id: str = ""
+    evidence_id: str = ""
+    start_offset: int = 0
+    end_offset: int = 0
 
 
 @dataclass
@@ -67,14 +71,16 @@ class CitationManager:
         registered: list[EvidenceSource] = []
         meta = metadata or {}
 
-        for url in URL_PATTERN.findall(content)[:5]:
+        for url in URL_PATTERN.findall(content)[:20]:
+            excerpt = _excerpt_around(content, url, 400)
             src = EvidenceSource(
                 source_id=self._next_id(),
                 step_index=step_index,
                 step_type=step_type,
                 source_kind="url",
                 locator=url.rstrip(".,;"),
-                excerpt=content[:800].replace("\n", " "),
+                excerpt=excerpt,
+                artifact_id=str(meta.get("artifact_id") or ""),
             )
             self.sources.append(src)
             registered.append(src)
@@ -88,6 +94,7 @@ class CitationManager:
                 source_kind="sql",
                 locator=sql_hint or "mysql://structured_query",
                 excerpt=content[:800].replace("\n", " "),
+                artifact_id=str(meta.get("artifact_id") or ""),
             )
             self.sources.append(src)
             registered.append(src)
@@ -100,6 +107,7 @@ class CitationManager:
                 source_kind="file",
                 locator=meta.get("filename", "uploaded_file"),
                 excerpt=content[:800].replace("\n", " "),
+                artifact_id=str(meta.get("artifact_id") or ""),
             )
             self.sources.append(src)
             registered.append(src)
@@ -112,6 +120,7 @@ class CitationManager:
                 source_kind="kb",
                 locator="ragflow://internal_kb",
                 excerpt=content[:800].replace("\n", " "),
+                artifact_id=str(meta.get("artifact_id") or ""),
             )
             self.sources.append(src)
             registered.append(src)
@@ -124,6 +133,7 @@ class CitationManager:
                 source_kind="text",
                 locator=f"step:{step_index}:{step_type}",
                 excerpt=content[:800].replace("\n", " "),
+                artifact_id=str(meta.get("artifact_id") or ""),
             )
             self.sources.append(src)
             registered.append(src)
@@ -175,6 +185,67 @@ class CitationManager:
             registered.append(src)
         return registered
 
+    def bind_evidence_spans(self, spans: list[Any], findings: list[Any] | None = None) -> list[EvidenceSource]:
+        """把 EvidenceStore span/finding 登记为可引用 source。"""
+        registered: list[EvidenceSource] = []
+        claim_by_eid: dict[str, str] = {}
+        for finding in findings or []:
+            claim = getattr(finding, "claim", None) or (
+                finding.get("claim") if isinstance(finding, dict) else ""
+            )
+            ids = getattr(finding, "evidence_ids", None)
+            if ids is None and isinstance(finding, dict):
+                ids = finding.get("evidence_ids") or []
+            for eid in ids or []:
+                claim_by_eid[str(eid)] = str(claim or "")
+        for span in spans or []:
+            if isinstance(span, dict):
+                eid = str(span.get("evidence_id") or "")
+                locator = str(span.get("locator") or "")
+                text = str(span.get("text") or "")
+                kind = str(span.get("source_kind") or "text")
+                artifact_id = str(span.get("artifact_id") or "")
+                step_index = int(span.get("step_index") or 0)
+                step_type = str(span.get("step_type") or "")
+                start = int(span.get("start_offset") or 0)
+                end = int(span.get("end_offset") or 0)
+            else:
+                eid = str(getattr(span, "evidence_id", "") or "")
+                locator = str(getattr(span, "locator", "") or "")
+                text = str(getattr(span, "text", "") or "")
+                kind = str(getattr(span, "source_kind", "text") or "text")
+                artifact_id = str(getattr(span, "artifact_id", "") or "")
+                step_index = int(getattr(span, "step_index", 0) or 0)
+                step_type = str(getattr(span, "step_type", "") or "")
+                start = int(getattr(span, "start_offset", 0) or 0)
+                end = int(getattr(span, "end_offset", 0) or 0)
+            src = EvidenceSource(
+                source_id=self._next_id(),
+                step_index=step_index,
+                step_type=step_type,
+                source_kind=kind,
+                locator=locator or eid,
+                excerpt=text[:800],
+                bound_fact=claim_by_eid.get(eid, text[:240]),
+                artifact_id=artifact_id,
+                evidence_id=eid,
+                start_offset=start,
+                end_offset=end,
+            )
+            self.sources.append(src)
+            if src.bound_fact:
+                self.fact_bindings.append(
+                    {
+                        "fact": src.bound_fact,
+                        "source_id": src.source_id,
+                        "locator": src.locator,
+                        "evidence_id": src.evidence_id,
+                        "artifact_id": src.artifact_id,
+                    }
+                )
+            registered.append(src)
+        return registered
+
     def build_lookup_block(self, *, max_items: int = 12, excerpt_chars: int = 480) -> str:
         """写报告步可回读的证据目录（digest 之外的原文摘录）。"""
         if not self.sources:
@@ -189,6 +260,8 @@ class CitationManager:
             excerpt = (src.bound_fact or src.excerpt or "")[:excerpt_chars]
             lines.append(
                 f"  [{num}] {src.source_id} ({src.source_kind}) {src.locator}"
+                + (f" artifact={src.artifact_id}" if src.artifact_id else "")
+                + (f" evidence={src.evidence_id}" if src.evidence_id else "")
             )
             if excerpt:
                 lines.append(f"      {excerpt}")
@@ -370,6 +443,10 @@ class CitationManager:
                     excerpt=str(row.get("excerpt") or ""),
                     timestamp=str(row.get("timestamp") or datetime.now().isoformat()),
                     bound_fact=str(row.get("bound_fact") or ""),
+                    artifact_id=str(row.get("artifact_id") or ""),
+                    evidence_id=str(row.get("evidence_id") or ""),
+                    start_offset=int(row.get("start_offset") or 0),
+                    end_offset=int(row.get("end_offset") or 0),
                 )
             )
         self.fact_bindings = [
@@ -408,3 +485,15 @@ def _split_report_sentences(text: str) -> list[str]:
         else:
             merged.append(part)
     return merged
+
+
+def _excerpt_around(content: str, needle: str, width: int = 400) -> str:
+    text = (content or "").replace("\n", " ")
+    if not needle:
+        return text[:width]
+    idx = text.lower().find(needle.lower())
+    if idx < 0:
+        return text[:width]
+    left = max(0, idx - width // 4)
+    right = min(len(text), idx + len(needle) + width)
+    return text[left:right]
