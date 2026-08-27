@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.agent.memory.identity import (
     DEFAULT_PROJECT_ID,
@@ -39,27 +39,45 @@ class MemoryPolicy:
     merge_embedding_threshold: float = 0.88
     pii_redact_enabled: bool = True
     step_incremental_enabled: bool = True
+    step_incremental_write_longterm: bool = False
     remember_on_partial: bool = False
-    # 【Phase 18】身份与分层
+    # 【Phase 18/24】身份与分层
     project_scope_enabled: bool = True
-    require_explicit_identity: bool = False
-    # 【Phase 18】信任准入（反持久化注入）
-    min_recall_trust: str = TrustTier.UNTRUSTED.value
+    require_explicit_identity: bool = True
+    # 信任准入：普通召回默认 derived+，untrusted 不注入窗口
+    min_recall_trust: str = TrustTier.DERIVED.value
     synthesis_min_trust: str = TrustTier.DERIVED.value
     require_provenance_for_step_write: bool = True
     # 【Phase 18】来源台账
     source_ledger_enabled: bool = True
     source_ledger_max_inject: int = 8
+    source_freshness_days: int = 7
     # 【Phase 18】合成步二次召回
     step_recall_enabled: bool = True
     step_recall_top_k: int = 3
-    # 【Phase 18】离线巩固
+    # 【Phase 18/24】离线巩固
     consolidation_enabled: bool = True
     consolidation_async: bool = True
+    consolidation_durable: bool = True
     consolidation_half_life_days: int = 30
     consolidation_min_confidence: float = 0.25
     consolidation_promote_min_sessions: int = 2
+    consolidation_promote_min_confirmations: int = 2
     purge_after_days: int = 180
+    utility_gate_enabled: bool = True
+    ttl_by_type: dict[str, int] = field(default_factory=dict)
+    volatile_semantic_ttl_days: int = 7
+    memory_dsn: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.ttl_by_type:
+            self.ttl_by_type = {
+                "preference": 0,
+                "procedural": 0,
+                "semantic": int(self.ttl_days or 90),
+                "episodic": 14,
+                "source": 180,
+            }
 
 
 def get_memory_policy() -> MemoryPolicy:
@@ -79,6 +97,7 @@ def get_memory_policy() -> MemoryPolicy:
         merge_embedding_threshold=cfg.memory_merge_embedding_threshold,
         pii_redact_enabled=cfg.memory_pii_redact_enabled,
         step_incremental_enabled=cfg.memory_step_incremental_enabled,
+        step_incremental_write_longterm=cfg.memory_step_incremental_write_longterm,
         remember_on_partial=cfg.memory_remember_on_partial,
         project_scope_enabled=cfg.memory_project_scope_enabled,
         require_explicit_identity=cfg.memory_require_explicit_identity,
@@ -87,14 +106,21 @@ def get_memory_policy() -> MemoryPolicy:
         require_provenance_for_step_write=cfg.memory_require_provenance_for_step_write,
         source_ledger_enabled=cfg.memory_source_ledger_enabled,
         source_ledger_max_inject=cfg.memory_source_ledger_max_inject,
+        source_freshness_days=cfg.memory_source_freshness_days,
         step_recall_enabled=cfg.memory_step_recall_enabled,
         step_recall_top_k=cfg.memory_step_recall_top_k,
         consolidation_enabled=cfg.memory_consolidation_enabled,
         consolidation_async=cfg.memory_consolidation_async,
+        consolidation_durable=cfg.memory_consolidation_durable,
         consolidation_half_life_days=cfg.memory_consolidation_half_life_days,
         consolidation_min_confidence=cfg.memory_consolidation_min_confidence,
         consolidation_promote_min_sessions=cfg.memory_consolidation_promote_min_sessions,
+        consolidation_promote_min_confirmations=cfg.memory_consolidation_promote_min_confirmations,
         purge_after_days=cfg.memory_purge_after_days,
+        utility_gate_enabled=cfg.memory_utility_gate_enabled,
+        ttl_by_type=dict(cfg.memory_ttl_by_type or {}),
+        volatile_semantic_ttl_days=cfg.memory_volatile_semantic_ttl_days,
+        memory_dsn=cfg.memory_dsn,
     )
 
 
@@ -149,7 +175,7 @@ def synthesis_min_trust_tier(policy: MemoryPolicy) -> TrustTier:
 
 
 def min_recall_trust_tier(policy: MemoryPolicy) -> TrustTier:
-    return coerce_trust_tier(policy.min_recall_trust, default=TrustTier.UNTRUSTED)
+    return coerce_trust_tier(policy.min_recall_trust, default=TrustTier.DERIVED)
 
 
 __all__ = [

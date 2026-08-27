@@ -25,6 +25,8 @@ async def _run():
             min_fact_chars=10,
             max_facts_per_remember=3,
             embedding_enabled=False,
+            utility_gate_enabled=False,
+            min_recall_trust="untrusted",
         )
         backend = JsonMemoryBackend(Path(tmp), policy)
         store = MemoryStore(backend=backend, policy=policy)

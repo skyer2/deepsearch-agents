@@ -65,8 +65,7 @@ BUILD_CONTEXT
 
 EXECUTE 检索步成功
   有出处？──否──► 网页步丢弃（不写长期）
-           ──是──► STEP_INCREMENTAL（untrusted 或 derived）
-                 └─ URL 记入 source_ledger
+           ──是──► Source Ledger + Evidence（默认不写长期 Memory）
 
 EXECUTE 合成步（写报告）
   二次 recall(min_trust=derived) ──► 丢掉脏网页结论
@@ -75,11 +74,11 @@ HITL reject/edit
   procedural + trusted ──► 「用户改过什么」
 
 FINALIZE
-  抽取 curated findings ──► ADD/UPDATE/SUPERSEDE
-  异步 consolidation ──► 衰减 / 晋升 / 硬清理
+  抽取候选 ── Utility / Provenance / Freshness Gate ── ADD/UPDATE/SUPERSEDE
+  durable job ──► 衰减 / 独立确认晋升 / 硬清理
 ```
 
-冲突动作对齐 Mem0，但研搜多了 SUPERSEDE：旧记录软删并留下取代链，方便审计「结论何时被推翻」。低信任不能覆盖高信任（网页改不了用户偏好）。
+冲突动作参考过经典 consolidation 的 ADD/UPDATE/DELETE，但研搜需要审计历史，因此扩展了 SUPERSEDE。Mem0 最新实现已演进为 ADD-only extraction；SUPERSEDE 是本仓的 domain decision。低信任不能覆盖高信任（网页改不了用户偏好）。Trust 晋升只接受独立证据或人工确认，被多次召回不等于被证明。
 
 ## 4. 身份模型
 
@@ -112,7 +111,7 @@ session_id → 仅溯源，不参与隔离
 
 **被追问「和 Mem0 / Perplexity Brain 的关系」**
 
-> 我们没有把 Mem0 当内核。Mem0 的 ADD/UPDATE/DELETE 语义我们自研实现了，并加了研搜特有的 SUPERSEDE 和信任准入。Perplexity 把用户 Memory 和 Agent Brain 分开，我们对应的是 preference/semantic vs source_ledger + HITL procedural。框架侧 Compaction 已经是一等能力，这比先上复杂 Memory OS 更划算。
+> 我们没有把 Mem0 当内核。经典 ADD/UPDATE/DELETE 语义我们自研实现了，并加了研搜特有的 SUPERSEDE、信任准入和独立确认晋升。Mem0 最新 OSS 算法已转向 ADD-only extraction，面试不要说「业界最新就是 ADD/UPDATE/SUPERSEDE」。Perplexity 把用户 Memory 和 Agent Brain 分开，我们对应的是 preference/semantic vs source_ledger + HITL procedural。Evidence 才是 source of truth，长期 Memory 只是可复用 hint。
 
 **被追问「最大的坑」**
 

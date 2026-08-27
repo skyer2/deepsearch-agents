@@ -26,6 +26,8 @@ async def _run():
         min_fact_chars=10,
         max_facts_per_remember=5,
         embedding_enabled=False,
+        utility_gate_enabled=False,
+        min_recall_trust="untrusted",
     )
 
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
@@ -113,7 +115,13 @@ async def _run():
     del os.environ["HARNESS_MEMORY_TENANT_ID"]
     print("[OK] tenant resolve")
 
-    json_policy = MemoryPolicy(provider="local", embedding_enabled=False, min_fact_chars=10)
+    json_policy = MemoryPolicy(
+        provider="local",
+        embedding_enabled=False,
+        min_fact_chars=10,
+        utility_gate_enabled=False,
+        min_recall_trust="untrusted",
+    )
     with tempfile.TemporaryDirectory() as tmp2:
         jb = JsonMemoryBackend(Path(tmp2), json_policy)
         jstore = MemoryStore(backend=jb, policy=json_policy)

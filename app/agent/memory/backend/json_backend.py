@@ -13,6 +13,7 @@ from app.agent.memory.backend.base import MemoryBackend
 from app.agent.memory.consolidation import (
     ConsolidationAction,
     apply_update,
+    apply_validity_fields,
     decide_write_action,
 )
 from app.agent.memory.models import (
@@ -25,6 +26,7 @@ from app.agent.memory.models import (
 from app.agent.memory.policy import MemoryPolicy
 from app.agent.memory.recall.hybrid import hybrid_recall
 from app.agent.memory.security import contains_pii, redact_pii
+from app.agent.memory.validity import record_is_expired
 
 
 class JsonMemoryBackend(MemoryBackend):
@@ -118,6 +120,7 @@ class JsonMemoryBackend(MemoryBackend):
                 continue
             if decision.action == ConsolidationAction.UPDATE and decision.target:
                 apply_update(decision.target, write)
+                apply_validity_fields(decision.target, write)
                 saved += 1
                 continue
             record = MemoryRecord(
@@ -138,7 +141,9 @@ class JsonMemoryBackend(MemoryBackend):
                 trust_tier=write.resolved_trust_tier(),
                 provenance=write.resolved_provenance(),
                 dedup_key=write.dedup_key,
+                idempotency_key=write.idempotency_key,
             )
+            apply_validity_fields(record, write)
             if decision.action == ConsolidationAction.SUPERSEDE and decision.target:
                 decision.target.is_deleted = True
                 decision.target.superseded_by = record.id
@@ -163,7 +168,7 @@ class JsonMemoryBackend(MemoryBackend):
             preferred = [r for r in records if r.project_id == project_id]
             others = [r for r in records if r.project_id != project_id]
             records = preferred + others
-        return [r for r in records if include_deleted or not r.is_expired(self.policy.ttl_days)]
+        return [r for r in records if include_deleted or not record_is_expired(r, self.policy)]
 
     async def delete_record(
         self,

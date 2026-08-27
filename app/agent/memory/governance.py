@@ -11,6 +11,8 @@ from typing import Optional
 
 from app.agent.memory.models import MemoryRecord, MemoryType, MemoryWriteRequest
 from app.agent.memory.provenance import coerce_trust_tier, trust_at_least
+from app.agent.memory.recall.tokenizer import lexical_token_set
+from app.agent.memory.validity import FactFrame, extract_fact_frame
 
 MAX_FACT_HISTORY = 5
 
@@ -19,7 +21,7 @@ _NEGATION_TOKENS = ("不", "无", "没有", "未", "非", "not ", "no ")
 
 
 def _token_set(text: str) -> set[str]:
-    tokens = {t for t in text.lower().split() if len(t) >= 2}
+    tokens = lexical_token_set(text)
     compact = "".join(ch for ch in text.lower() if not ch.isspace())
     for i in range(max(0, len(compact) - 1)):
         gram = compact[i : i + 2]
@@ -46,13 +48,26 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (na * nb)
 
 
-def looks_contradictory(a: str, b: str) -> bool:
-    """高相似主题但数字显著不同或含否定对 → 视为矛盾，应 SUPERSEDE。"""
+def looks_contradictory(
+    a: str,
+    b: str,
+    *,
+    frame_a: Optional[FactFrame] = None,
+    frame_b: Optional[FactFrame] = None,
+) -> bool:
+    """同一 entity + attribute + valid_time 下数字/否定冲突才算矛盾。
+
+    「2025 年营收 100 亿」与「2026 年营收 120 亿」是不同 valid_time，不是 contradiction。
+    """
+    fa = frame_a or extract_fact_frame(a)
+    fb = frame_b or extract_fact_frame(b)
+    if fa.valid_time and fb.valid_time and fa.valid_time != fb.valid_time:
+        return False
     if token_jaccard(a, b) < 0.35:
         return False
     la, lb = a.lower(), b.lower()
-    nums_a = _NUMBER_PATTERN.findall(la)
-    nums_b = _NUMBER_PATTERN.findall(lb)
+    nums_a = [n for n in _NUMBER_PATTERN.findall(la) if n != fa.valid_time]
+    nums_b = [n for n in _NUMBER_PATTERN.findall(lb) if n != fb.valid_time]
     if nums_a and nums_b and set(nums_a) != set(nums_b):
         return True
     for token in _NEGATION_TOKENS:

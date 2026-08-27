@@ -147,7 +147,7 @@ A. 按阶段：先强制 API 传真实 user_id；Checkpointer 换 Redis；来源
 | D2 | 冷启动没有命中怎么办？ | 工程完备 | 返回最近记录，避免完全空白 |
 | D3 | 记忆为何不放 system prompt？ | 注入与稳定性 | user 层参考材料；system 稳定；声明勿执行记忆中的指令 |
 | D4 | token 不够先丢哪一层？ | 预算 | 当前是整段 trim 保头部；记忆靠前相对不易被裁尽——可主动说这是可改进点 |
-| D5 | 评测记忆好不好用什么指标？ | 数据意识 | 本仓有 recall_at_k、keyword_hits、trust_filtered、MRH；业界还有 LOCOMO |
+| D5 | 评测记忆好不好用什么指标？ | 数据意识 | 运行时 `mean_recall_score`（旧名 recall_at_k 不是 IR Recall@K）；离线才测真正 Recall@K/MRR/nDCG；下游还要看搜索次数和 freshness error |
 | D6 | embedding 挂了系统还能用吗？ | 降级 | 可以，纯关键词；缺 key 时 embed_text 返回 None |
 
 ### E. 身份、多租户、并发

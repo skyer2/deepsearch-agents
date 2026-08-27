@@ -73,22 +73,30 @@ class HarnessConfig:
     memory_merge_embedding_threshold: float = 0.88
     memory_pii_redact_enabled: bool = True
     memory_step_incremental_enabled: bool = True
+    memory_step_incremental_write_longterm: bool = False
     memory_remember_on_partial: bool = False
     memory_project_scope_enabled: bool = True
-    memory_require_explicit_identity: bool = False
-    memory_min_recall_trust: str = "untrusted"
+    memory_require_explicit_identity: bool = True
+    memory_min_recall_trust: str = "derived"
     memory_synthesis_min_trust: str = "derived"
     memory_require_provenance_for_step_write: bool = True
     memory_source_ledger_enabled: bool = True
     memory_source_ledger_max_inject: int = 8
+    memory_source_freshness_days: int = 7
     memory_step_recall_enabled: bool = True
     memory_step_recall_top_k: int = 3
     memory_consolidation_enabled: bool = True
     memory_consolidation_async: bool = True
+    memory_consolidation_durable: bool = True
     memory_consolidation_half_life_days: int = 30
     memory_consolidation_min_confidence: float = 0.25
     memory_consolidation_promote_min_sessions: int = 2
+    memory_consolidation_promote_min_confirmations: int = 2
     memory_purge_after_days: int = 180
+    memory_utility_gate_enabled: bool = True
+    memory_ttl_by_type: dict[str, int] = field(default_factory=dict)
+    memory_volatile_semantic_ttl_days: int = 7
+    memory_dsn: str = ""
 
     validation_strict_mode: bool = False
 
@@ -352,6 +360,10 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
             "HARNESS_MEMORY_STEP_INCREMENTAL",
             bool(memory.get("step_incremental_enabled", True)),
         ),
+        memory_step_incremental_write_longterm=_env_bool(
+            "HARNESS_MEMORY_STEP_LONGTERM",
+            bool(memory.get("step_incremental_write_longterm", False)),
+        ),
         memory_remember_on_partial=_env_bool(
             "HARNESS_MEMORY_REMEMBER_ON_PARTIAL",
             bool(memory.get("remember_on_partial", False)),
@@ -362,9 +374,9 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
         ),
         memory_require_explicit_identity=_env_bool(
             "HARNESS_MEMORY_REQUIRE_IDENTITY",
-            bool(memory.get("require_explicit_identity", False)),
+            bool(memory.get("require_explicit_identity", True)),
         ),
-        memory_min_recall_trust=str(memory.get("min_recall_trust", "untrusted")),
+        memory_min_recall_trust=str(memory.get("min_recall_trust", "derived")),
         memory_synthesis_min_trust=str(memory.get("synthesis_min_trust", "derived")),
         memory_require_provenance_for_step_write=_env_bool(
             "HARNESS_MEMORY_REQUIRE_PROVENANCE",
@@ -375,6 +387,7 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
             bool(memory.get("source_ledger_enabled", True)),
         ),
         memory_source_ledger_max_inject=int(memory.get("source_ledger_max_inject", 8)),
+        memory_source_freshness_days=int(memory.get("source_freshness_days", 7)),
         memory_step_recall_enabled=_env_bool(
             "HARNESS_MEMORY_STEP_RECALL",
             bool(memory.get("step_recall_enabled", True)),
@@ -388,6 +401,10 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
             "HARNESS_MEMORY_CONSOLIDATION_ASYNC",
             bool(memory.get("consolidation_async", True)),
         ),
+        memory_consolidation_durable=_env_bool(
+            "HARNESS_MEMORY_CONSOLIDATION_DURABLE",
+            bool(memory.get("consolidation_durable", True)),
+        ),
         memory_consolidation_half_life_days=int(
             memory.get("consolidation_half_life_days", 30)
         ),
@@ -397,7 +414,24 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
         memory_consolidation_promote_min_sessions=int(
             memory.get("consolidation_promote_min_sessions", 2)
         ),
+        memory_consolidation_promote_min_confirmations=int(
+            memory.get("consolidation_promote_min_confirmations", 2)
+        ),
         memory_purge_after_days=int(memory.get("purge_after_days", 180)),
+        memory_utility_gate_enabled=_env_bool(
+            "HARNESS_MEMORY_UTILITY_GATE",
+            bool(memory.get("utility_gate_enabled", True)),
+        ),
+        memory_ttl_by_type={
+            str(k): int(v)
+            for k, v in dict(memory.get("ttl_by_type") or {}).items()
+        },
+        memory_volatile_semantic_ttl_days=int(
+            memory.get("volatile_semantic_ttl_days", 7)
+        ),
+        memory_dsn=str(
+            os.getenv("HARNESS_MEMORY_DSN", memory.get("dsn", "") or "")
+        ),
         validation_strict_mode=_env_bool(
             "HARNESS_VALIDATION_STRICT",
             bool(validation.get("strict_mode", False)),

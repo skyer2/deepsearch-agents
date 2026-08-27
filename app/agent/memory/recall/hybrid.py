@@ -20,22 +20,12 @@ from app.agent.memory.provenance import (
     is_recall_eligible,
 )
 from app.agent.memory.recall.embedding import embed_text
+from app.agent.memory.recall.tokenizer import keyword_overlap
+from app.agent.memory.validity import record_is_expired
 
 
 def _keyword_score(query: str, fact: str) -> float:
-    q_tokens = [t for t in query.lower().split() if t]
-    fact_lower = fact.lower()
-    if q_tokens:
-        hits = sum(1 for t in q_tokens if t in fact_lower)
-        return hits / len(q_tokens)
-    compact_q = "".join(ch for ch in query.lower() if not ch.isspace())
-    if len(compact_q) < 2:
-        return 0.0
-    grams = [compact_q[i : i + 2] for i in range(len(compact_q) - 1)]
-    if not grams:
-        return 0.0
-    hits = sum(1 for g in grams if g in fact_lower)
-    return hits / len(grams)
+    return keyword_overlap(query, fact)
 
 
 def _recency_boost(created_at: str) -> float:
@@ -86,7 +76,7 @@ async def hybrid_recall(
         for r in records
         if not r.is_deleted
         and not r.superseded_by
-        and not r.is_expired(policy.ttl_days)
+        and not record_is_expired(r, policy)
         and r.memory_type in allowed_types
     ]
 
@@ -97,7 +87,7 @@ async def hybrid_recall(
     for record in active:
         if is_recall_eligible(
             record,
-            min_trust=getattr(policy, "min_recall_trust", TrustTier.UNTRUSTED),
+            min_trust=getattr(policy, "min_recall_trust", TrustTier.DERIVED),
             target_step_type=target_step_type,
             synthesis_step_types=synthesis_types,
             synthesis_min_trust=getattr(policy, "synthesis_min_trust", TrustTier.DERIVED),
@@ -108,7 +98,7 @@ async def hybrid_recall(
 
     empty = RecallResult(
         records=[],
-        recall_at_k=0.0,
+        mean_recall_score=0.0,
         keyword_hits=0,
         embedding_used=False,
         candidates=candidates,
@@ -158,15 +148,15 @@ async def hybrid_recall(
     else:
         selected = [r for _, r, _ in scored[:top_k]]
 
-    recall_at_k = 0.0
+    mean_recall_score = 0.0
     if selected:
-        recall_at_k = sum(r.recall_score or 0.0 for r in selected) / len(selected)
+        mean_recall_score = sum(r.recall_score or 0.0 for r in selected) / len(selected)
 
     by_trust = dict(Counter(coerce_trust_tier(r.trust_tier).value for r in selected))
     by_type = dict(Counter(r.type_label() for r in selected))
     return RecallResult(
         records=selected,
-        recall_at_k=round(recall_at_k, 4),
+        mean_recall_score=round(mean_recall_score, 4),
         keyword_hits=keyword_hits,
         embedding_used=embedding_used,
         candidates=candidates,

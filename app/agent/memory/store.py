@@ -13,6 +13,7 @@ from app.agent.memory.backend.base import MemoryBackend
 from app.agent.memory.backend.json_backend import JsonMemoryBackend
 from app.agent.memory.backend.sqlite_backend import SqliteMemoryBackend
 from app.agent.memory.identity import MemoryIdentity, resolve_memory_identity
+from app.agent.memory.jobs import consolidation_job
 from app.agent.memory.models import (
     MemoryRecord,
     MemoryType,
@@ -27,8 +28,9 @@ from app.agent.memory.policy import (
     identity_allows_write,
 )
 from app.agent.memory.provenance import (
-    source_dedup_key,
+    source_ledger_id,
 )
+from app.agent.memory.utility import filter_longterm_writes
 from app.config.loader import get_harness_config
 
 _SHARED_STORE: Optional["MemoryStore"] = None
@@ -62,8 +64,11 @@ class MemoryStore:
         provider = self.policy.provider.lower()
         if provider == "local":
             return JsonMemoryBackend(self.storage_dir, self.policy)
-        if provider == "sqlite":
-            return SqliteMemoryBackend(self.storage_dir / "memory.db", self.policy)
+        if provider == "postgres":
+            from app.agent.memory.backend.postgres_backend import PostgresMemoryBackend
+
+            dsn = self.policy.memory_dsn or os.getenv("HARNESS_MEMORY_DSN", "")
+            return PostgresMemoryBackend(dsn, self.policy, storage_dir=self.storage_dir)
         if provider == "mem0":
             return JsonMemoryBackend(self.storage_dir, self.policy)
         return SqliteMemoryBackend(self.storage_dir / "memory.db", self.policy)
@@ -140,7 +145,7 @@ class MemoryStore:
         identity: Optional[MemoryIdentity] = None,
         session_id: str = "",
     ) -> RecallResult:
-        empty = RecallResult(records=[], recall_at_k=0.0, keyword_hits=0, embedding_used=False)
+        empty = RecallResult(records=[], mean_recall_score=0.0, keyword_hits=0, embedding_used=False)
         if not self.policy.enabled:
             self._last_recall_result = empty
             return empty
@@ -174,7 +179,7 @@ class MemoryStore:
                         )
                 result = RecallResult(
                     records=records[:k],
-                    recall_at_k=1.0 if records else 0.0,
+                    mean_recall_score=1.0 if records else 0.0,
                     keyword_hits=len(records),
                     embedding_used=True,
                 )
@@ -229,7 +234,13 @@ class MemoryStore:
             )
             return 0
 
-        for write in writes:
+        kept, rejected = filter_longterm_writes(writes, self.policy)
+        if rejected:
+            print(f"[Memory] utility gate rejected {rejected} candidate(s)")
+        if not kept:
+            return 0
+
+        for write in kept:
             if not write.project_id:
                 write.project_id = ident.project_id
             if not write.session_id:
@@ -238,7 +249,7 @@ class MemoryStore:
         if self._mem0 is not None:
             try:
                 saved = 0
-                for write in writes[: self.policy.max_facts_per_remember]:
+                for write in kept[: self.policy.max_facts_per_remember]:
                     self._mem0.add(
                         write.fact,
                         user_id=ident.user_id,
@@ -255,7 +266,7 @@ class MemoryStore:
                 print(f"[Memory] Mem0 remember failed, fallback backend: {exc}")
 
         return await self._backend.remember_writes(
-            writes,
+            kept,
             tenant_id=ident.tenant_id,
             user_id=ident.user_id,
             project_id=ident.project_id,
@@ -346,16 +357,25 @@ class MemoryStore:
     ) -> int:
         if not self.policy.source_ledger_enabled or not locators:
             return 0
+        from app.agent.memory.provenance import source_dedup_key
+
         entries: list[SourceLedgerEntry] = []
         seen: set[str] = set()
         for locator in locators:
-            key = source_dedup_key(locator, kind=source_kind)
-            if not key or key in seen:
+            loc_key = source_dedup_key(locator, kind=source_kind)
+            if not loc_key or loc_key in seen:
                 continue
-            seen.add(key)
+            seen.add(loc_key)
+            entry_id = source_ledger_id(
+                tenant_id=identity.tenant_id,
+                user_id=identity.user_id,
+                project_id=identity.project_id,
+                locator=locator,
+                kind=source_kind,
+            )
             entries.append(
                 SourceLedgerEntry(
-                    id=key,
+                    id=entry_id,
                     tenant_id=identity.tenant_id,
                     user_id=identity.user_id,
                     project_id=identity.project_id,
@@ -364,6 +384,8 @@ class MemoryStore:
                     quality=quality,
                     session_id=session_id or identity.session_id,
                     metadata=metadata or {},
+                    query_purpose=str((metadata or {}).get("query_purpose") or ""),
+                    content_fingerprint=str((metadata or {}).get("content_fingerprint") or ""),
                 )
             )
         return await self._backend.upsert_source_ledger(entries)
@@ -405,6 +427,103 @@ class MemoryStore:
             user_id=ident.user_id,
             project_id=ident.project_id,
         )
+
+    def enqueue_consolidation(
+        self,
+        *,
+        user_id: str,
+        tenant_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+        identity: Optional[MemoryIdentity] = None,
+    ) -> str:
+        ident = self._identity(
+            user_id=user_id,
+            tenant_id=tenant_id,
+            project_id=project_id,
+            identity=identity,
+        )
+        enqueue = getattr(self._backend, "enqueue_consolidation_job", None)
+        if callable(enqueue):
+            return str(
+                enqueue(
+                    tenant_id=ident.tenant_id,
+                    user_id=ident.user_id,
+                    project_id=ident.project_id,
+                )
+                or ""
+            )
+        return consolidation_job(
+            tenant_id=ident.tenant_id,
+            user_id=ident.user_id,
+            project_id=ident.project_id,
+        ).id
+
+    async def drain_jobs(self, limit: int = 8) -> dict[str, int]:
+        drain = getattr(self._backend, "drain_jobs", None)
+        if callable(drain):
+            return await drain(limit)
+        return {"claimed": 0, "done": 0, "failed": 0}
+
+    async def confirm_record(
+        self,
+        record_id: str,
+        *,
+        user_id: str,
+        source_id: str = "",
+        human: bool = False,
+        tenant_id: Optional[str] = None,
+        identity: Optional[MemoryIdentity] = None,
+    ) -> bool:
+        """独立证据或人工确认。确认次数用于 trust 晋升，与 recall_count 无关。"""
+        ident = self._identity(user_id=user_id, tenant_id=tenant_id, identity=identity)
+        records = self._backend.list_records(
+            tenant_id=ident.tenant_id,
+            user_id=ident.user_id,
+            include_deleted=False,
+        )
+        target = next((r for r in records if r.id == record_id), None)
+        if target is None:
+            return False
+        if human:
+            target.human_confirmed = True
+        if source_id and source_id not in target.confirmed_by_source_ids:
+            target.confirmed_by_source_ids.append(source_id)
+        target.confirmation_count = len(target.confirmed_by_source_ids) + (1 if target.human_confirmed else 0)
+        from datetime import datetime, timezone
+
+        target.last_verified_at = datetime.now(timezone.utc).isoformat()
+        from app.agent.memory.provenance import Provenance
+
+        urls = list(target.provenance.source_urls)
+        eids = list(target.provenance.evidence_ids)
+        if source_id and source_id not in eids:
+            eids.append(source_id)
+        write = MemoryWriteRequest(
+            fact=target.fact,
+            memory_type=target.memory_type,
+            confidence=target.confidence,
+            write_source=WriteSource.CONFIRMATION,
+            project_id=target.project_id,
+            trust_tier=target.trust_tier,
+            provenance=Provenance(
+                source_kind=target.provenance.source_kind or "confirm",
+                source_urls=urls,
+                evidence_ids=eids,
+                step_type=target.provenance.step_type,
+                run_id=target.provenance.run_id,
+                tool=target.provenance.tool,
+                citation_count=target.provenance.citation_count,
+            ),
+            last_verified_at=target.last_verified_at,
+            human_confirmed=human,
+        )
+        saved = await self._backend.remember_writes(
+            [write],
+            tenant_id=ident.tenant_id,
+            user_id=ident.user_id,
+            project_id=ident.project_id,
+        )
+        return saved > 0
 
     def get_audit_log(self):
         backend = self._backend

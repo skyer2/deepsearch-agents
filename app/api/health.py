@@ -216,8 +216,14 @@ async def collect_health() -> dict[str, Any]:
                 "step_incremental_enabled": config.memory_step_incremental_enabled,
                 "project_scope_enabled": config.memory_project_scope_enabled,
                 "require_explicit_identity": config.memory_require_explicit_identity,
+                "min_recall_trust": config.memory_min_recall_trust,
                 "synthesis_min_trust": config.memory_synthesis_min_trust,
                 "source_ledger_enabled": config.memory_source_ledger_enabled,
+                "step_incremental_write_longterm": getattr(
+                    config, "memory_step_incremental_write_longterm", False
+                ),
+                "utility_gate_enabled": getattr(config, "memory_utility_gate_enabled", True),
+                "consolidation_durable": getattr(config, "memory_consolidation_durable", True),
                 "consolidation_enabled": config.memory_consolidation_enabled,
             },
             "guardrails": {

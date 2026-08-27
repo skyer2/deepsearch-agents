@@ -44,10 +44,18 @@ harness:
       compress: 8000
 
   memory:
-    provider: "sqlite"         # sqlite | local | mem0
+    provider: "sqlite"         # sqlite | local | postgres | mem0；生产多实例用 postgres
+    dsn: ""                    # postgres DSN，或环境变量 HARNESS_MEMORY_DSN
     enabled: true
     recall_top_k: 5
-    ttl_days: 90               # 记忆过期天数，0=不过期
+    ttl_days: 90               # semantic 回退 TTL；0=不过期
+    ttl_by_type:
+      preference: 0            # 直到用户改/删
+      procedural: 0
+      semantic: 90
+      episodic: 14
+      source: 180
+    volatile_semantic_ttl_days: 7
     max_facts_per_remember: 5
     min_fact_chars: 12
     wrap_untrusted: true       # recall 注入时 <untrusted> 包裹，防注入
@@ -57,23 +65,28 @@ harness:
     merge_jaccard_threshold: 0.55
     merge_embedding_threshold: 0.88
     pii_redact_enabled: true
-    step_incremental_enabled: true   # 检索步成功后步内增量写入
+    step_incremental_enabled: true   # 检索步成功后写 Source Ledger
+    step_incremental_write_longterm: false  # 步内结果默认不进长期 Memory
     remember_on_partial: false       # 仅 success 时 finalize 写入
-    # 【Phase 18】企业级分层记忆
+    utility_gate_enabled: true       # Future Utility Gate
+    # 【Phase 18/24】企业级分层记忆
     project_scope_enabled: true      # 同项目记忆加权，避免重复检索
-    require_explicit_identity: false # 生产建议 true：拒绝 session 退化身份写入
-    min_recall_trust: "untrusted"    # 常规召回最低信任：untrusted|derived|trusted
+    require_explicit_identity: true  # 拒绝 session 退化身份写入
+    min_recall_trust: "derived"      # 常规召回最低信任；untrusted 不注入
     synthesis_min_trust: "derived"   # 写报告二次召回最低信任
     require_provenance_for_step_write: true  # 网页步无 URL 不写长期记忆
     source_ledger_enabled: true      # 项目已查来源台账
     source_ledger_max_inject: 8
+    source_freshness_days: 7         # 超过则应 revisit，而不是永不再查
     step_recall_enabled: true        # 合成步二次召回
     step_recall_top_k: 3
-    consolidation_enabled: true      # finalize 后衰减/晋升/硬清理
+    consolidation_enabled: true      # finalize 后衰减/确认晋升/硬清理
     consolidation_async: true
+    consolidation_durable: true      # 先入 durable job，再 drain
     consolidation_half_life_days: 30
     consolidation_min_confidence: 0.25
-    consolidation_promote_min_sessions: 2
+    consolidation_promote_min_sessions: 2   # 仅保留兼容字段，晋升不再用 recall
+    consolidation_promote_min_confirmations: 2
     purge_after_days: 180
 
   validation:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Any, Optional
 
 from app.agent.memory.models import (
     MemoryRecord,
@@ -104,3 +104,12 @@ class MemoryBackend(ABC):
         project_id: str = "",
     ) -> dict[str, int]:
         return {"decayed": 0, "promoted": 0, "purged": 0, "examined": 0}
+
+    def enqueue_job(self, job: Any) -> str:
+        return ""
+
+    async def drain_jobs(self, limit: int = 8) -> dict[str, int]:
+        return {"claimed": 0, "done": 0, "failed": 0}
+
+    def enqueue_consolidation_job(self, *, tenant_id: str, user_id: str, project_id: str = "") -> str:
+        return ""

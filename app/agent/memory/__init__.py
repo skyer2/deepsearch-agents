@@ -17,6 +17,7 @@ from app.agent.memory.policy import (
 )
 from app.agent.memory.provenance import Provenance, TrustTier
 from app.agent.memory.store import MemoryStore, get_memory_store
+from app.agent.memory.utility import passes_utility_gate
 
 __all__ = [
     "MemoryStore",
@@ -32,6 +33,7 @@ __all__ = [
     "TrustTier",
     "get_memory_policy",
     "get_memory_store",
+    "passes_utility_gate",
     "resolve_memory_identity",
     "resolve_memory_user_id",
     "resolve_memory_tenant_id",
