@@ -83,6 +83,69 @@ def apply_plan_patch(
     return candidate, []
 
 
+def build_progress_patch(
+    plan: ExecutionPlan,
+    intent: TaskIntent,
+    *,
+    assessment: dict[str, Any] | None = None,
+    worker_results: list[Any] | None = None,
+    max_new_tasks: int = 2,
+) -> dict[str, Any]:
+    """把 ProgressAssessment 收成受约束的 PlanPatch proposal（仍须 apply_plan_patch）。"""
+    from app.research.planning.progress import ProgressAssessment
+
+    parsed = ProgressAssessment.from_dict(assessment or {})
+    policy = parse_source_policy(intent.raw_query)
+    default_sources = [s for s in ("web", "kb", "db") if s in policy.allowed_sources]
+    if not default_sources:
+        return {"add_tasks": [], "reason": "no_allowed_source"}
+
+    proposals: list[dict[str, Any]] = []
+
+    def _append(objective: str, reason: str) -> None:
+        if len(proposals) >= max(0, max_new_tasks):
+            return
+        text = str(objective or "").strip()
+        if not text:
+            return
+        proposals.append(
+            {
+                "task_id": f"t_gap_{len(proposals) + 1}",
+                "objective": text[:200],
+                "depends_on": [],
+                "allowed_sources": list(default_sources),
+                "reason": reason,
+            }
+        )
+
+    for item in parsed.coverage_gaps:
+        _append(_objective_from_gap(item, plan), "coverage")
+    for item in parsed.conflicts:
+        _append(f"交叉验证冲突：{item}", "conflict")
+    for item in parsed.stale_evidence:
+        _append(f"补充最新年份证据：{item}", "stale")
+    for item in parsed.missing_dimensions:
+        _append(f"补充维度：{item}", "missing_dimension")
+
+    if proposals:
+        return {"reason": parsed.reason or "semantic_gap", "add_tasks": proposals}
+
+    fallback = build_gap_patch(plan, intent, worker_results=worker_results)
+    return fallback
+
+
+def _objective_from_gap(item: str, plan: ExecutionPlan) -> str:
+    text = str(item or "")
+    parts = text.split(":", 2)
+    if len(parts) >= 3:
+        tid, rest = parts[1], parts[2]
+        for step in plan.steps:
+            if step.task_id == tid or str(step.resolved_task_id(0)) == tid:
+                return f"补充证据：{step.objective or step.description or rest}"
+        return f"补充证据：{rest}"
+    return f"补充证据：{text}" if text else ""
+
+
 def build_gap_patch(
     plan: ExecutionPlan,
     intent: TaskIntent,

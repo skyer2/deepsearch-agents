@@ -155,7 +155,8 @@ def test_compile_research_graph():
     assert result["plan"]
     assert result["task_status"]
     assert any(v == "done" for v in result["task_status"].values())
-    print(f"[OK] graph invoke status={result.get('status')} tasks={result['task_status']}")
+    assert result.get("progress_assessment") is not None
+    print(f"[OK] graph invoke status={result.get('status')} tasks={result['task_status']} progress={result.get('progress_assessment')}")
 
 
 def test_plan_step_roundtrip_includes_dag_fields():

@@ -243,6 +243,7 @@ def test_config_phase23():
     assert cfg.context_reversible_compression is True
     assert cfg.token_stage_budgets["synthesis"] == 40000
     assert cfg.graph_runtime_enabled is True
+    assert cfg.progress_eval_enabled is True
     print("[OK] config phase23")
 
 

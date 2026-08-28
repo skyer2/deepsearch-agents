@@ -181,6 +181,9 @@ harness:
     direct_worker_invoke: true              # 按步直调 Leaf Worker，禁止 Main Agent 二次路由
     persist_loop_state: true                # checkpoint.json 落整份 LoopState（副作用幂等仍要 IdempotencyRegistry）
     graph_runtime_enabled: true             # 生产调度权威：Research StateGraph（legacy while 仅作回退）
+    progress_eval_enabled: true             # Evidence → Progress Evaluator → GAP/ENOUGH
+    graph_checkpoint_backend: sqlite        # sqlite | memory；多实例再换 postgres
+    graph_checkpoint_path: output/.harness/graph_checkpoints.sqlite
 
   # 【Phase 14】工业级 Planner：结构化槽位 + 默认 LLM + 澄清 + Plan 审批
   planner:

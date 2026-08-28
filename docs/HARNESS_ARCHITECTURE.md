@@ -22,15 +22,17 @@
 │  Intent / Plan / Policy / Budget / Memory / Citation / Eval      │
 │  Context Selector · Artifact/Evidence Store · Tool Gateway       │
 │  MCP PolicyContext（tenant/user/run/task/scopes/allowlist）       │
-│  权威业务状态：LoopState → output/session_*/.harness/checkpoint.json│
+│  控制状态：ResearchState → SQLite checkpointer                     │
+│  副作用状态：LoopState → output/session_*/.harness/checkpoint.json  │
 └───────────────┬─────────────────────────────────────────────────┘
                 │ research_graph.ainvoke
                 ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │ Research StateGraph Runtime（生产调度权威）                        │
 │  intent → clarify → plan → validate → dispatch                   │
-│  Send(research workers) → join → progress → synthesis            │
-│  interrupt() = HITL；checkpointer = 图内恢复                       │
+│  Send(isolated workers) → join → Progress Evaluator              │
+│  GAP → constrained replan；ENOUGH → synthesis → Quality Gate     │
+│  interrupt() = HITL；SQLite checkpointer = 图内恢复                │
 └───────────────┬───────────────────────────┬─────────────────────┘
                 │ invoke(本步工人)           │ invoke(合成工人)
                 ▼                           ▼
@@ -90,7 +92,7 @@
 | 上下文 | 历史全塞 | Brief + JIT；原文在 Artifact Store |
 | 失败 | 模型再试或任务失败 | validate 失败码 + recover / replan + Kill Switch |
 | 引用 / 记忆 / 评测 | 无 | claim→span、分层 Memory、golden eval |
-| 进度 | 无任务级 checkpoint | LoopState 一份 JSON + 图内 checkpointer |
+| 进度 | 无任务级 checkpoint | LoopState JSON（副作用热恢复）+ 图内 SQLite checkpointer |
 | HITL | 无或仅工具中断 | 澄清 / 计划审批 / 查库 gate / 写文件 interrupt |
 
 教学版解决「DeepAgents 怎么把三个专家跑起来」。本仓库解决「一次研搜如何按剧本交付，并且 **LLM context ≠ application state**」。
@@ -101,11 +103,13 @@
 
 > 研搜要的是领域 Harness，不是再造一个 LangGraph。Domain Harness 管计划、校验、护栏、评测和 Context Store；生产调度权威是 Research StateGraph；Leaf Worker 按稳定 Profile 直调。MCP 只标准化 capability 接入，权限和副作用治理仍在 Harness。窗口只保留当前决策需要的信息，可重新取得的大内容全部 `artifact://` / `evidence://` 外置。
 
-相关代码：`app/research/runtime/graph.py`、`app/agent/harness/loop.py`、`context_builder.py`、`artifacts.py`、`evidence_store.py`、`token_counter.py`、`worker_profiles.py`、`app/mcp/`。
+相关代码：`app/research/runtime/graph.py`、`app/research/planning/progress.py`、`app/agent/harness/loop.py`、`context_builder.py`、`artifacts.py`、`evidence_store.py`、`token_counter.py`、`worker_profiles.py`、`app/mcp/`。
+
+权威设计：[RESEARCH_INTELLIGENCE.md](./RESEARCH_INTELLIGENCE.md)。
 
 ---
 
-## Phase 20–25 落地对照
+## Phase 20–26 落地对照
 
 | Phase | 做了什么 | 权威文档 |
 |-------|----------|----------|
@@ -115,6 +119,7 @@
 | 23 | 上下文虚拟化：Artifact/Evidence + glm-5.2 预算 + JIT | [CONTEXT_SYSTEM.md](./CONTEXT_SYSTEM.md) |
 | 24 | Memory 生产门禁：身份四元组、信任分级、来源台账 | [MEMORY_SYSTEM.md](./MEMORY_SYSTEM.md) |
 | 25 | MCP 从 stdio 适配层升级为 Capability Plane | [MCP_SYSTEM.md](./MCP_SYSTEM.md) |
+| 26 | Research Intelligence Loop：Progress Evaluator + 隔离并行 + SQLite ResearchState | [RESEARCH_INTELLIGENCE.md](./RESEARCH_INTELLIGENCE.md) |
 
 面试运维面：`GET /api/harness/capabilities` 返回当前 `graph_runtime_enabled`、`direct_worker_invoke`、fail-closed / SQL 护栏。
 

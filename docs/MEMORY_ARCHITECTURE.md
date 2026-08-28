@@ -34,7 +34,7 @@
 
 会话记忆   Session / Checkpoint / Event Log
            → LoopState + StepCheckpointStore + JSONL trace
-           → LangGraph InMemorySaver（Research StateGraph / Leaf 图内，进程级）
+           → LangGraph SQLite checkpointer（Research StateGraph；失败回退 InMemorySaver）
 
 情节记忆   「上次调研的结论」
            → MemoryStore semantic/episodic + 项目加权召回

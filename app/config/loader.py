@@ -177,6 +177,9 @@ class HarnessConfig:
     direct_worker_invoke: bool = True
     persist_loop_state: bool = True
     graph_runtime_enabled: bool = False
+    progress_eval_enabled: bool = True
+    graph_checkpoint_backend: str = "sqlite"
+    graph_checkpoint_path: str = "output/.harness/graph_checkpoints.sqlite"
 
     planner_llm_confirm_enabled: bool = False
     planner_llm_confirm_min_confidence: float = 0.5
@@ -662,6 +665,25 @@ def load_harness_config(path: Path | None = None) -> HarnessConfig:
         graph_runtime_enabled=_env_bool(
             "HARNESS_GRAPH_RUNTIME",
             bool(orch.get("graph_runtime_enabled", True)),
+        ),
+        progress_eval_enabled=_env_bool(
+            "HARNESS_PROGRESS_EVAL",
+            bool(orch.get("progress_eval_enabled", True)),
+        ),
+        graph_checkpoint_backend=str(
+            os.getenv(
+                "HARNESS_GRAPH_CHECKPOINT_BACKEND",
+                orch.get("graph_checkpoint_backend", "sqlite"),
+            )
+        ),
+        graph_checkpoint_path=str(
+            os.getenv(
+                "HARNESS_GRAPH_CHECKPOINT",
+                orch.get(
+                    "graph_checkpoint_path",
+                    "output/.harness/graph_checkpoints.sqlite",
+                ),
+            )
         ),
         planner_llm_confirm_enabled=_env_bool(
             "HARNESS_PLANNER_LLM_CONFIRM",

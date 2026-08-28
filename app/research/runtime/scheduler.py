@@ -52,10 +52,19 @@ def task_status_map(plan: ExecutionPlan) -> dict[str, str]:
     return status
 
 
-def _deps_satisfied(step: PlanStep, status: dict[str, str]) -> bool:
+def _deps_satisfied(
+    step: PlanStep,
+    status: dict[str, str],
+    *,
+    allow_failed_deps: bool = False,
+) -> bool:
     for dep in step.depends_on or []:
-        if status.get(dep) != "done":
-            return False
+        current = status.get(dep)
+        if current == "done":
+            continue
+        if allow_failed_deps and current == "failed":
+            continue
+        return False
     return True
 
 
@@ -64,6 +73,7 @@ def ready_steps(
     status: dict[str, str] | None = None,
     *,
     include_types: Iterable[str] | None = None,
+    allow_failed_deps: bool = False,
 ) -> list[tuple[int, PlanStep]]:
     status = status or task_status_map(plan)
     allowed = set(include_types) if include_types is not None else None
@@ -77,7 +87,7 @@ def ready_steps(
             continue
         if allowed is not None and step.step_type not in allowed:
             continue
-        if _deps_satisfied(step, status):
+        if _deps_satisfied(step, status, allow_failed_deps=allow_failed_deps):
             ready.append((index, step))
     return ready
 
@@ -112,8 +122,15 @@ def all_retrieval_done(plan: ExecutionPlan, status: dict[str, str] | None = None
 def next_synthesis_step(
     plan: ExecutionPlan,
     status: dict[str, str] | None = None,
+    *,
+    allow_failed_deps: bool = False,
 ) -> tuple[int, PlanStep] | None:
-    ready = ready_steps(plan, status, include_types=SYNTHESIS_STEP_TYPES)
+    ready = ready_steps(
+        plan,
+        status,
+        include_types=SYNTHESIS_STEP_TYPES,
+        allow_failed_deps=allow_failed_deps,
+    )
     return ready[0] if ready else None
 
 
