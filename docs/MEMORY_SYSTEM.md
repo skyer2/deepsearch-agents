@@ -2,7 +2,8 @@
 
 > 对照代码仓 `app/agent/memory/` + `app/agent/harness/loop.py` 的现行实现。
 > 面试精简版与问题清单见 [MEMORY_INTERVIEW.md](./MEMORY_INTERVIEW.md)。  
-> 单次任务的窗口与压缩见 [CONTEXT_SYSTEM.md](./CONTEXT_SYSTEM.md)（压缩 ≠ Memory）。
+> 单次任务的窗口与压缩见 [CONTEXT_SYSTEM.md](./CONTEXT_SYSTEM.md)（压缩 ≠ Memory）。  
+> 工具身份与 MCP token 与 MemoryIdentity 同源，见 [MCP_SYSTEM.md](./MCP_SYSTEM.md)。
 
 ---
 
@@ -30,7 +31,7 @@ P3  Agent 越用越会查             → Procedural / HITL 沉淀
 | **长期记忆 Memory** | `MemoryStore`（SQLite 默认） | 跨 session、跨任务 | curated fact、偏好、HITL 教训、已查来源 |
 | **工作记忆 Compaction** | `ContextCompressor` + `ContextBuilder` | 单次任务内 | 步骤摘要、evidence digest、token 预算 |
 | **会话续跑 Checkpoint** | `StepCheckpointStore`（`output/session_*/.harness/checkpoint.json`） | 同 session 同任务指纹 | 已完成步骤，进程重启可续 |
-| **图内 Checkpointer** | LangGraph `InMemorySaver` | 进程内、DeepAgent 图 | 子 Agent 的 messages replay |
+| **图内 Checkpointer** | LangGraph `InMemorySaver` | 进程内、Research StateGraph / Leaf | 图内 interrupt 与 worker messages replay |
 | **可观测 Trace** | JSONL `logs/traces/{session_id}.jsonl` | 离线分析 | phase 事件，含 memory 指标 |
 
 **RAGFlow 不是 Memory。** RAG 是外部、多人共享、相对静态的知识库，走工具/子 Agent，结果进入本次 `step_results`。Memory 是「这个用户 / 这个项目 / 这个 Agent 自己」的状态。

@@ -1,7 +1,7 @@
 <div align='center'>
   <h1 style="margin-top: 15px;">「深度研搜」对话式多智能体研究系统</h1>
   <h4><b>deepsearch-agents</b></h4>
-  <p><em>DeepAgents 多智能体深度研搜 + 自研 Agent Harness 运行时层 — 可见、可测、可控，适合 2026 年 Agent / Harness 工程师面试展示</em></p>
+  <p><em>Deep Research 领域 Harness：StateGraph 调度 + 稳定 Worker Profile + 上下文虚拟化 + Memory 生产门禁 + MCP Capability Plane — 可见、可测、可控</em></p>
 </div>
 
 <div align='center'>
@@ -9,7 +9,7 @@
 ![AI](https://img.shields.io/badge/AI-Agent-00c853?style=flat)
 ![Harness](https://img.shields.io/badge/Agent-Harness-7C3AED?style=flat)
 ![DeepAgents](https://img.shields.io/badge/DeepAgents-0.5.7-1C3C3C.svg)
-![MCP](https://img.shields.io/badge/MCP-stdio-2563EB?style=flat)
+![MCP](https://img.shields.io/badge/MCP-Capability_Plane-2563EB?style=flat)
 ![Eval](https://img.shields.io/badge/Eval-8_metrics-F59E0B?style=flat)
 ![FastAPI](https://img.shields.io/badge/FastAPI-WebSocket-009688.svg?logo=fastapi&logoColor=white)
 ![Stars](https://img.shields.io/github/stars/didilili/deepsearch-agents?logo=github&style=flat)
@@ -18,7 +18,24 @@
 
 </div>
 
-**📢 说明**：本仓库在 2026 年 5 月教学版基础上，已完成 **Agent Harness 企业级升级（v1.0-harness）**，配套设计文档 [`docs/AGENT_HARNESS_DESIGN.md`](docs/AGENT_HARNESS_DESIGN.md)、[BrowseComp-Plus 固定语料评测指南](docs/BROWSECOMP_PLUS_EVAL.md)、golden task 评测与 GitHub Actions 回归门禁。
+**📢 说明**：本仓库在教学版多智能体研搜之上，已完成 **Agent Harness 企业级升级**。现行权威不是「一次 `create_deep_agent` 黑盒跑完全程」，而是：
+
+- **Domain Harness** 管计划 / 校验 / 护栏 / 评测 / 记忆 / 上下文
+- **Research StateGraph** 是生产调度权威（`graph_runtime_enabled: true`）
+- **Leaf Worker** 按稳定 Profile 直调，主图不再二次路由
+- **MCP** 是可插拔 capability 边界，默认仍可 LangChain 直连
+
+配套文档：
+
+| 文档 | 内容 |
+|------|------|
+| [Harness 运行时架构](docs/HARNESS_ARCHITECTURE.md) | StateGraph + Worker Profile + 与教学版对照 |
+| [领域 Harness 决策边界](docs/RESEARCH_HARNESS.md) | 谁是 Agent、谁是控制面 |
+| [上下文工程](docs/CONTEXT_SYSTEM.md) | Artifact / Evidence / JIT / glm-5.2 预算 |
+| [Memory 系统](docs/MEMORY_SYSTEM.md) | 身份四元组、信任分级、来源台账 |
+| [MCP Capability Plane](docs/MCP_SYSTEM.md) | 真身份、并发池、durable Tasks、DB 护栏 |
+| [升级设计草案](docs/AGENT_HARNESS_DESIGN.md) | 2026-07 动机与路线（部分章节已被上表取代） |
+| [BrowseComp-Plus 评测](docs/BROWSECOMP_PLUS_EVAL.md) | 固定语料评测 |
 
 如果你正在找一个适合学习 `DeepAgents`、`WebSocket`、`Tavily`、`RAGFlow` 和 AI Agent 工程开发的实战项目，「深度研搜」很可能是最适合你的项目。
 
@@ -35,18 +52,18 @@
 
 ### 面试一句话
 
-> 在深度研搜场景下，我自研了领域 Harness：显式 Loop 管计划/校验/护栏/评测；检索步按计划直调工人，主图只写文件。任务进度只认落库的 LoopState，LangGraph 只跑单步。当前是可演示 MVP+。
+> 在深度研搜场景下，我自研了领域 Harness：显式 Loop 管计划/校验/护栏/评测；生产调度权威是 Research StateGraph；检索步按稳定 Worker Profile 直调。原文进 Artifact/Evidence，模型只看短卡和 ref。MCP 是可插拔 capability 边界，Gateway 做身份、策略、熔断和审计。任务进度只认落库的 LoopState。
 
-相关说明：[Harness 架构](docs/HARNESS_ARCHITECTURE.md)
+相关说明：[Harness 架构](docs/HARNESS_ARCHITECTURE.md) · [MCP](docs/MCP_SYSTEM.md) · [上下文](docs/CONTEXT_SYSTEM.md) · [Memory](docs/MEMORY_SYSTEM.md)
 
 ### Harness 五层架构
 
 ```text
-Layer 5  体验层     React — Phase 时间线 / 文件下载
+Layer 5  体验层     React — Phase 时间线 / HITL 审批 / Eval / Trace
 Layer 4  服务层     FastAPI — 任务调度 / WebSocket / GET /health
-Layer 3  Harness层  loop / worker_runtime / loop_state_store / validator / recovery
-Layer 2  Runtime层  按步工人图 + 合成主图（DeepAgents）+ LangGraph 单步发动机
-Layer 1  工具层     MCP Registry + Tavily / MySQL / RAGFlow + Memory
+Layer 3  Harness层  Domain 控制面：plan / policy / memory / citation / eval / context store
+Layer 2  Runtime层  Research StateGraph（生产权威）+ Leaf Worker（create_agent）
+Layer 1  工具层     MCP Capability Plane ↔ LangChain tools（Tavily / MySQL / RAGFlow / Files）
 ```
 
 ### 核心能力矩阵
@@ -54,13 +71,14 @@ Layer 1  工具层     MCP Registry + Tavily / MySQL / RAGFlow + Memory
 | 能力 | 实现 | 关键路径 |
 |------|------|----------|
 | 显式 Loop | per-step execute/compress/validate/recover | `app/agent/harness/loop.py` |
-| 按步工人 | 检索直调工人图，主图只写文件 | `app/agent/harness/worker_runtime.py` [架构](docs/HARNESS_ARCHITECTURE.md) |
+| 生产调度 | Research StateGraph；legacy while 仅回退 | `app/research/runtime/graph.py` [架构](docs/HARNESS_ARCHITECTURE.md) |
+| 按步工人 | 稳定 Profile 直调，主图不二次路由 | `worker_runtime.py` / `worker_profiles.py` |
 | LoopState 落库 | checkpoint.json 为任务进度权威 | `app/agent/harness/loop_state_store.py` |
 | 结果校验 | step + finalize 双层校验 | `app/agent/harness/validator.py` |
-| 失败恢复 | 结构化 hint + 重试上限 | `app/agent/harness/recovery.py` |
-| 上下文工程与压缩 | 分层 user message + 步级压缩 + 窗口卫生 + 证据回读 | `app/agent/harness/` [全貌](docs/CONTEXT_SYSTEM.md) [改进对照](docs/CONTEXT_IMPROVEMENTS.md) [面试](docs/CONTEXT_INTERVIEW.md) |
-| 跨会话记忆 | 分层 Memory：身份四元组 + 信任分级 + 来源台账 + SUPERSEDE | `app/agent/memory/` [全貌](docs/MEMORY_SYSTEM.md) [面试](docs/MEMORY_INTERVIEW.md) [业界对照](docs/MEMORY_ARCHITECTURE.md) |
-| MCP 工具发现 | Registry + **真 stdio MCP Server（Tavily）** | `app/mcp/` |
+| 失败恢复 | 结构化 hint + 重试上限 + Kill Switch | `app/agent/harness/recovery.py` |
+| 上下文虚拟化 | Artifact/Evidence + JIT + glm-5.2 预算 + 短卡合同 | [CONTEXT_SYSTEM.md](docs/CONTEXT_SYSTEM.md) |
+| 跨会话记忆 | 身份四元组 + 信任分级 + 来源台账 + SUPERSEDE | [MEMORY_SYSTEM.md](docs/MEMORY_SYSTEM.md) |
+| MCP Capability Plane | Registry / 真 token / 并发池 / durable Tasks / DB 护栏 | [MCP_SYSTEM.md](docs/MCP_SYSTEM.md) |
 | 可观测性 | WebSocket + Langfuse + JSONL 日志 | `app/api/monitor.py` `tracing.py` `trace_logger.py` |
 | 评测回归 | 10 条 golden task + 8 项指标 + baseline | `tests/eval/` + CI |
 | 配置化 | `harness.yml` 统一开关 | `app/config/harness.yml` |
@@ -69,15 +87,17 @@ Layer 1  工具层     MCP Registry + Tavily / MySQL / RAGFlow + Memory
 ### 执行数据流（升级后）
 
 ```text
-用户任务 → FastAPI(thread_id)
+用户任务 → FastAPI(thread_id, user_id, tenant_id, project_id)
   → AgentHarness.run()
-      → understand → plan → build_context(memory recall)
-      → for each step:
-            检索步直调工人图 / 写文件走主图
-            execute → compress → validate
-          → fail → recover → retry
+      → 绑定 MemoryIdentity + MCP ToolCallContext（签发 access token）
+      → understand → plan → Research Brief
+      → Research StateGraph：
+            dispatch / Send fan-out
+            按 Worker Profile 直调 web/db/kb/file 工人
+            工具短卡进窗口，原文进 Artifact Store
+            join → synthesis（JIT read_evidence）
       → LoopState 写入 checkpoint.json
-      → finalize(memory remember) → JSONL trace
+      → finalize(memory remember + consolidation job) → JSONL trace
   → WebSocket 推送 phase 事件 → 前端时间线
 ```
 
@@ -88,9 +108,12 @@ Layer 1  工具层     MCP Registry + Tavily / MySQL / RAGFlow + Memory
 ```bash
 # 1. 单元测试（无需 API Key）
 uv run python tests/test_harness_phase1.py
-uv run python tests/test_harness_phase4.py
+uv run python tests/test_harness_phase10_tools.py
+uv run python tests/test_harness_phase16_mcp_production.py
 uv run python tests/test_harness_phase20_runtime.py
-uv run python tests/test_mcp_tavily_server.py
+uv run python tests/test_harness_phase23_context.py
+uv run python tests/test_harness_phase24_memory.py
+uv run python tests/test_harness_phase25_mcp.py
 
 # 2. Eval 评测 + 基线对比
 uv run python tests/eval/run_eval.py --dry-run --baseline tests/eval/results/baseline.json --report-md
@@ -102,8 +125,9 @@ uv run python tests/eval/run_eval.py --live --limit 3 --report-md
 uv run uvicorn app.api.server:app --reload
 curl http://localhost:8000/health
 
-# 5. 真 MCP Tavily Server（stdio，需 TAVILY_API_KEY）
-# 在 harness.yml 设 mcp.tavily_enabled: true 或 .env 设 HARNESS_MCP_TAVILY=true
+# 5. MCP（默认关闭；打开后 Tavily/MySQL/RAGFlow/Files 走 Gateway）
+# harness.yml: mcp.enabled: true  或  HARNESS_MCP_ENABLED=true
+# 生产再开 mcp.require_auth: true
 uv run python -m app.mcp.servers.tavily_server
 ```
 
@@ -177,45 +201,44 @@ CI 在每次 push/PR 时自动跑 dry-run eval，**TSR 下降 > 5% 则阻断合�
 
 ```text
 用户任务
-  -> FastAPI 接口接收请求
-  -> AgentHarness.run() 显式 Loop
-  -> understand / plan / per-step execute / validate / recover
-  -> 分派给网络搜索助手 / 数据库查询助手 / RAGFlow 助手
-  -> MCP Registry 按 step 注入工具上下文
-  -> 调用文件工具生成 Markdown / PDF
+  -> FastAPI 接口接收请求（含 user/tenant/project）
+  -> AgentHarness.run() 领域控制面
+  -> Research StateGraph：intent / plan / Send 并行工人 / synthesis
+  -> Worker Profile 注入最小工具集；MCP 或 LangChain 执行
+  -> Artifact / Evidence 外置原文；短卡回窗口
   -> monitor + JSONL + Langfuse 记录全链路
-  -> 前端展示 Phase 时间线、答案和文件列表
+  -> 前端展示 Phase 时间线、HITL 审批、答案和文件列表
 ```
 
 ## ✨ 项目亮点
 
-- **自研 Agent Harness 运行时层（2026 面试核心）**
-  - 显式 per-step Loop：execute → compress → validate → recover，非黑盒 `astream`。
-  - `harness.yml` 配置化 + budget 守卫 + JSONL 结构化日志 + `GET /health`。
-- **一主三从的多智能体架构**
-  - 主智能体负责理解任务、规划步骤、调度助手和最终汇总。
-  - 网络搜索助手、数据库查询助手、RAGFlow 助手分别处理不同信息来源。
-- **多来源检索，而不是模型裸答**
-  - `Tavily` 负责互联网公开资料检索。
-  - `MySQL` 负责查询结构化业务数据。
-  - `RAGFlow` 负责查询内部非结构化文档。
-  - 上传附件由主智能体通过文件工具读取。
+- **自研领域 Harness（面试核心）**
+  - 显式 per-step Loop：execute → compress → validate → recover。
+  - 生产调度权威是 **Research StateGraph**；DeepAgents 不再当第二导演。
+  - `harness.yml` 配置化 + budget 守卫 + JSONL + `GET /health`。
+- **稳定 Worker Profile，而不是把全部工具塞给模型**
+  - `web_researcher` / `db_researcher` / `kb_researcher` / `file_researcher` / `mixed_researcher`。
+  - 公开研究看不到 SQL / RAG / 写文件；schema 稳定也利于 KV cache。
+- **上下文虚拟化**
+  - 工具先把原文写入 Artifact Store，模型只看到 snippet + `artifact_id`。
+  - 写报告 JIT `read_evidence`，压缩摘要可回读。详见 [CONTEXT_SYSTEM.md](docs/CONTEXT_SYSTEM.md)。
+- **Memory 生产门禁**
+  - 请求级身份四元组、信任分级、来源台账、SUPERSEDE、durable consolidation。
+  - 默认不把网页原文写入长期记忆。详见 [MEMORY_SYSTEM.md](docs/MEMORY_SYSTEM.md)。
+- **MCP Capability Plane，而不是「挂几个 MCP 函数」**
+  - Tavily / MySQL / RAGFlow / Files 均可在 LangChain 直连 ↔ MCP 之间切换。
+  - 真 caller token、task-scoped policy、server env 隔离、并发 pool、durable Tasks、DB 行/字节/超时护栏。
+  - 详见 [MCP_SYSTEM.md](docs/MCP_SYSTEM.md)。
+- **一主多专家的信息源分工**
+  - 网络搜索、MySQL、RAGFlow、会话文件仍是不同 capability；由 Harness 按计划调度，而不是主 Agent 自己路由。
 - **从检索到交付的完整可运行链路**
-  - 不停留在 Prompt 设计，而是会真实调用工具、读取数据、生成 Markdown，并在需要时转换成 PDF。
+  - 真实调用工具、读取数据、生成 Markdown / PDF，HITL 可打断写文件和查库。
 - **长任务执行过程可观察**
-  - 工具调用、子智能体调用、工作目录创建、任务结果、取消和异常都会通过 `monitor` 推送到前端。
-- **会话级上下文隔离**
-  - 通过 `thread_id` 和 `session_dir` 区分不同任务，`ContextVar` 让深层工具也能拿到当前会话身份和文件目录。
-- **工程化前后端结构清晰**
-  - 基于 `FastAPI + WebSocket + DeepAgents + React` 组织任务接口、异步执行、事件推送、文件上传和文件下载。
+  - 工具调用、工人调用、Phase 事件、Eval 面板、Trace 查看器。
 - **Golden Task 评测 + CI 回归门禁**
   - 10 条评测任务、8 项指标、baseline 对比；GitHub Actions 自动跑分。
-- **真 MCP Server（Tavily stdio）**
-  - `app/mcp/servers/tavily_server.py` 通过 MCP 协议暴露搜索工具，Registry 可按 step 发现。
-- **不仅有实战代码，还有完整配套教程文档**
-  - 项目配有一套系统化、完全免费的教程讲义，适合按章节从 DeepAgents 基础、子智能体、Backend、中间件一直学到完整项目闭环。
-- **兼顾学习价值与可扩展性**
-  - 既可以按教程章节逐步理解，也可以在此基础上继续扩展权限控制、任务队列、事件持久化、评测体系等能力。
+- **配套教程文档**
+  - 教学版演进仍见下方章节；`main` 是当前完整 Harness 实现。
 
 这套课程十分适合这些场景：
 
@@ -226,25 +249,26 @@ CI 在每次 push/PR 时自动跑 dry-run eval，**TSR 下降 > 5% 则阻断合�
 
 ## 🏗️ 系统架构
 
-![深度研搜系统架构图：前端、FastAPI、DeepAgents、子智能体、工具和文件产物之间的关系](docs/images/deepsearch-system-architecture.svg)
+![深度研搜系统架构图：体验层、FastAPI、Domain Harness、Research StateGraph、Leaf Worker 与 MCP Capability Plane](docs/images/deepsearch-system-architecture.svg)
 
-项目采用 DeepAgents 中典型的 Orchestrator-Workers 模式：主智能体作为调度中心，三个专家助手负责信息获取，文件工具由主智能体直接掌握。
+项目采用 **领域 Harness + Research StateGraph + Leaf Workers**。教学版里的「主智能体调度三个专家」仍然是能力分工的来源，但生产路径里主图不再二次路由：计划由 Harness 生成，StateGraph `Send` fan-out，工人按 Profile 直调。
 
 项目围绕两条主线展开：
 
 | 主线             | 做什么                                                       | 涉及模块                                                                  |
 | ---------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------- |
-| 多智能体深度研搜 | 基于用户任务完成规划、分派、检索、读取附件、汇总和生成交付物 | `DeepAgents` / `LangChain` / `LangGraph` / `Tavily` / `MySQL` / `RAGFlow` |
+| 多智能体深度研搜 | 规划、分派、多源检索、生成交付物 | `LangGraph StateGraph` / Leaf Workers / `Tavily` / `MySQL` / `RAGFlow` / MCP Gateway |
 | 前后端实时闭环   | 启动后台任务、上传文件、推送执行过程、展示结果和下载生成文件 | `FastAPI` / `WebSocket` / `React` / `Vite`                                |
 
 ### 智能体与工具
 
 | 归属           | 能力                                     | 工具                                                          |
 | -------------- | ---------------------------------------- | ------------------------------------------------------------- |
-| 主智能体       | 任务规划、助手调度、结果汇总、文件交付   | `read_file_content`、`generate_markdown`、`convert_md_to_pdf` |
-| 网络搜索助手   | 查询互联网公开信息、新闻、政策和网页资料 | `internet_search`                                             |
-| 数据库查询助手 | 发现表名、预览表结构和样例数据、执行 SQL | `list_sql_tables`、`get_table_data`、`execute_sql_query`      |
-| RAGFlow 助手   | 发现可用知识库助手，并向内部知识库提问   | `get_assistant_list`、`create_ask_delete`                     |
+| `web_researcher` | 互联网公开资料                             | `internet_search` + `read_artifact` / `read_evidence`         |
+| `db_researcher` | 发现表、预览、只读 SQL                     | `list_sql_tables`、`get_table_data`、`execute_sql_query`      |
+| `kb_researcher` | RAGFlow 知识库                             | `get_assistant_list`、`create_ask_delete`                     |
+| `file_researcher` / 合成工人 | 读附件、写 Markdown/PDF            | `read_file_content`、`generate_markdown`、`convert_md_to_pdf` |
+| Harness 控制面 | 计划、策略、记忆、引用、HITL               | 不是 Agent；不进模型 tool surface                              |
 
 ![深度研搜网络搜索任务执行页：WebSocket 事件流、工具调用和最终回答](docs/images/deepsearch-network-search-result.jpg)
 
@@ -252,22 +276,22 @@ CI 在每次 push/PR 时自动跑 dry-run eval，**TSR 下降 > 5% 则阻断合�
 
 | 模块           | 技术                                             | 作用                                                                          |
 | -------------- | ------------------------------------------------ | ----------------------------------------------------------------------------- |
-| 智能体框架     | `DeepAgents`                                     | 创建主智能体和子智能体，承接长任务、多工具、多助手调度                        |
-| 图与检查点     | `LangGraph`                                      | 提供底层运行时和 `InMemorySaver` 会话检查点                                   |
-| 模型与工具抽象 | `LangChain` / `langchain-core`                   | 封装 OpenAI 兼容模型、工具声明和 Agent 调用结构                               |
-| 大模型接入     | OpenAI 兼容接口                                  | 通过 `.env` 中的 `OPENAI_BASE_URL`、`OPENAI_API_KEY`、`LLM_QWEN_MAX` 接入模型 |
-| 网络搜索       | `Tavily`                                         | 为网络搜索助手提供公开资料检索                                                |
-| 结构化数据     | `MySQL` / `mysql-connector-python`               | 为数据库助手提供药品、库存、销售等教学业务数据                                |
-| 私有知识库     | `RAGFlow` / `ragflow-sdk`                        | 为知识库助手提供内部文档问答能力                                              |
-| 文件处理       | `pypdf` / `python-docx` / `pandas` / `ReportLab` | 读取上传附件，生成 Markdown，转换 PDF                                         |
-| 后端接口       | `FastAPI` / `Uvicorn`                            | 提供任务、取消、上传、文件列表、下载和 WebSocket 接口                         |
-| 实时通信       | `WebSocket`                                      | 推送工具调用、助手调用、Harness Phase 事件和最终结果 |
-| 可观测性       | `Langfuse` + JSONL                               | 可选 Langfuse trace + 每次 run 写 `logs/traces/*.jsonl` |
-| MCP            | `mcp` SDK + stdio                                | Tavily 真 MCP Server；Registry 按 step 发现工具 |
-| Harness 配置   | `harness.yml`                                    | max_retries / 压缩 / 记忆 / 观测 / budget / MCP 开关 |
+| 智能体框架     | `LangGraph` + `langchain.agents.create_agent` | 生产调度权威是 Research StateGraph；Leaf Worker 直调 |
+| 图与检查点     | `LangGraph` checkpointer + LoopState JSON | 图内 HITL interrupt；任务进度认 checkpoint.json |
+| 模型与工具抽象 | `LangChain` / `langchain-core`                   | OpenAI 兼容模型、StructuredTool、MCP schema adapter |
+| 大模型接入     | OpenAI 兼容接口                                  | `OPENAI_BASE_URL`、`OPENAI_API_KEY`；token 预算默认 glm-5.2 |
+| 网络搜索       | `Tavily`（LangChain 或 tavily-mcp）              | 公开资料检索                                                |
+| 结构化数据     | `MySQL` + `db_core` 护栏                         | SELECT-only、LIMIT/bytes/timeout、可选读副本与表白名单 |
+| 私有知识库     | `RAGFlow` / `ragflow-sdk`                        | 内部文档问答                                              |
+| 文件处理       | `pypdf` / `python-docx` / `pandas` / `ReportLab` | 读取上传附件，生成 Markdown / PDF                         |
+| 后端接口       | `FastAPI` / `Uvicorn`                            | 任务、取消、上传、HITL resume、Eval、Trace、WebSocket |
+| 实时通信       | `WebSocket`                                      | 工具调用、Harness Phase、HITL、最终结果 |
+| 可观测性       | `Langfuse` + JSONL                               | 可选 Langfuse + `logs/traces/*.jsonl` |
+| MCP            | `mcp` SDK + Gateway / Pool / Tasks               | stdio（local）或 streamable-http；四 Server 可切换 |
+| Harness 配置   | `harness.yml`                                    | 编排 / 上下文 / 记忆 / MCP / SQL / HITL / budget |
 | 评测           | `tests/eval/`                                    | golden task + 8 指标 + baseline 回归 |
-| 前端           | `React` / `Vite` / `Ant Design` / `Tailwind CSS` | 对话式研搜界面、Harness Phase 时间线、附件上传和文件下载 |
-| 依赖管理       | `uv` / `pnpm`                                    | 管理 Python 后端和前端依赖                                                    |
+| 前端           | `React` / `Vite` / `Ant Design` / `Tailwind CSS` | 对话式研搜、Phase 时间线、HITL、Eval、Trace |
+| 依赖管理       | `uv` / `pnpm`                                    | Python 后端和前端依赖 |
 
 ## 📁 项目结构
 
@@ -275,47 +299,46 @@ CI 在每次 push/PR 时自动跑 dry-run eval，**TSR 下降 > 5% 则阻断合�
 deepsearch-agents/
 ├── app/
 │   ├── agent/
-│   │   ├── harness/                # 【核心】Agent Harness：loop/validator/recovery/compressor
-│   │   ├── memory/                 # 跨会话记忆 store + extractor
-│   │   ├── subagents/              # 网络搜索、数据库查询、RAGFlow 三个子智能体
+│   │   ├── harness/                # Domain Harness：loop / context / artifacts / profiles
+│   │   ├── memory/                 # 跨会话记忆：identity / trust / ledger / consolidation
+│   │   ├── subagents/              # 教学期专家定义（生产由 Worker Registry 直调）
 │   │   ├── llm.py
 │   │   ├── main_agent.py           # 委托 AgentHarness.run()
 │   │   └── prompts.py
+│   ├── research/
+│   │   ├── runtime/                # Research StateGraph（生产调度权威）
+│   │   ├── planning/               # Hybrid planner / policy / PlanPatch
+│   │   └── workers/                # Leaf Worker factory + registry
 │   ├── api/
-│   │   ├── context.py
-│   │   ├── monitor.py              # WebSocket 事件 + report_phase()
-│   │   ├── tracing.py              # Langfuse（可选）
-│   │   ├── trace_logger.py         # JSONL 结构化日志
-│   │   ├── health.py               # GET /health 依赖探针
+│   │   ├── monitor.py              # WebSocket + report_phase()
+│   │   ├── tracing.py / trace_logger.py
+│   │   ├── health.py
 │   │   └── server.py
-│   ├── config/
-│   │   └── harness.yml             # Harness 统一配置
-│   ├── mcp/
-│   │   ├── registry.py             # MCP 工具注册表
-│   │   ├── client.py               # bootstrap + MCP 桥接
-│   │   ├── mcp_runtime.py          # stdio MCP Client
-│   │   └── servers/
-│   │       └── tavily_server.py    # 真 MCP Server（Tavily）
-│   ├── prompt/
-│   ├── ragflow/
-│   ├── tools/
-│   ├── utils/
-│   ├── logs/traces/                # 运行时：JSONL trace（gitignore）
-│   ├── output/
-│   └── updated/
-├── .github/workflows/
-│   └── eval-regression.yml         # CI：dry-run eval + TSR 回归门禁
-├── docker/
+│   ├── config/harness.yml
+│   ├── mcp/                        # Capability Plane
+│   │   ├── registry.py / server_registry.py / client.py
+│   │   ├── mcp_gateway.py / tool_gateway.py / policy_context.py
+│   │   ├── auth.py / session_pool.py / http_transport.py
+│   │   ├── task_store.py / server_env.py / sql_guard.py
+│   │   └── servers/                # tavily / mysql / ragflow / files
+│   ├── tools/                      # LangChain 直连实现；与 MCP 共用 db_core
+│   └── logs/traces/
 ├── docs/
-│   └── AGENT_HARNESS_DESIGN.md     # Harness 设计文档 v1.0
+│   ├── HARNESS_ARCHITECTURE.md
+│   ├── RESEARCH_HARNESS.md
+│   ├── CONTEXT_SYSTEM.md
+│   ├── MEMORY_SYSTEM.md
+│   ├── MCP_SYSTEM.md
+│   └── AGENT_HARNESS_DESIGN.md     # 升级草案（部分已过时，以现行文档为准）
 ├── tests/
-│   ├── eval/                       # golden task + metrics + run_eval
-│   ├── test_harness_phase1.py
-│   ├── test_harness_phase4.py
-│   └── test_mcp_tavily_server.py
+│   ├── eval/
+│   ├── test_harness_phase10_tools.py
+│   ├── test_harness_phase16_mcp_production.py
+│   ├── test_harness_phase23_context.py
+│   ├── test_harness_phase24_memory.py
+│   └── test_harness_phase25_mcp.py
 ├── frontend/
 ├── .env.example
-├── pyproject.toml
 └── requirements.txt
 ```
 
@@ -334,9 +357,11 @@ deepsearch-agents/
 ### 2. 克隆项目
 
 ```bash
-git clone https://github.com/didilili/deepsearch-agents.git
+git clone https://github.com/skyer2/deepsearch-agents.git
 cd deepsearch-agents
 ```
+
+> 教学版源码与章节分支仍见 [didilili/deepsearch-agents](https://github.com/didilili/deepsearch-agents)。本仓库 `main` 是 Harness / MCP Capability Plane 现行实现。
 
 ### 3. 安装后端依赖
 
@@ -371,6 +396,7 @@ MYSQL_PASSWORD=root
 MYSQL_DATABASE=deepsearch_db
 MYSQL_HOST=localhost
 MYSQL_PORT=3307
+# 只读查询可指向副本：MYSQL_READ_HOST=localhost
 MYSQL_CHARSET=utf8mb4
 MYSQL_COLLATION=utf8mb4_unicode_ci
 MYSQL_SQL_MODE=TRADITIONAL
@@ -400,7 +426,7 @@ uv run uvicorn app.api.server:app --host 0.0.0.0 --port 8000 --reload
 
 | 接口                                | 说明                                   |
 | ----------------------------------- | -------------------------------------- |
-| `POST /api/task`                    | 启动一次 DeepAgents 后台任务           |
+| `POST /api/task`                    | 启动一次 Harness / StateGraph 后台任务 |
 | `POST /api/task/{thread_id}/cancel` | 取消指定会话任务                       |
 | `POST /api/upload`                  | 上传一个或多个文件到当前会话           |
 | `GET /api/files`                    | 列出当前会话输出目录中的生成文件       |
@@ -411,6 +437,12 @@ uv run uvicorn app.api.server:app --host 0.0.0.0 --port 8000 --reload
 | `POST /api/eval/run` | 触发 dry-run / live eval |
 | `GET /api/traces/jsonl/{session_id}` | Trace 查看器：本地 JSONL |
 | `GET /api/traces/langfuse/{session_id}` | Trace 查看器：Langfuse 代理 |
+| `GET /api/harness/capabilities`     | 运行时能力面（StateGraph / 护栏 / HITL） |
+| `GET /api/metrics/summary`          | 滚动窗口在线指标 |
+| `GET /api/metrics/prometheus`       | Prometheus exposition |
+| `GET /api/memory/recall`            | 按身份召回长期记忆 |
+| `GET /api/tools/mcp`                | MCP Gateway / Server 状态 |
+| `GET /api/tools/mcp/gateway/audit`  | MCP 耐久审计 |
 | `WebSocket /ws/{thread_id}`         | 推送工具调用、助手调用、Phase 事件和结果 |
 
 ### 8. 启动前端
@@ -482,25 +514,26 @@ git checkout main
 
 ## 🚧 能力边界
 
-「深度研搜」已完成 **Agent Harness MVP+**（显式 Loop、评测、MCP、记忆、观测），适合 Agent / Harness 工程师面试展示；但**不是**完整企业级生产系统。
+现行实现已经超过「能跑通多智能体 Demo」，也超过「能 list_tools 的 MCP 适配层」。它适合把 **领域 Harness / 上下文虚拟化 / Memory 门禁 / MCP 治理** 作为面试主线。它仍然 **不是** 完整多租户 SaaS。
 
-### 已覆盖（Harness MVP+）
+### 已覆盖
 
-- 显式 per-step Harness Loop + 校验恢复 + 上下文压缩
-- golden task 评测（8 指标）+ baseline 回归 + GitHub Actions CI
-- MCP Registry + Tavily 真 MCP Server（stdio）
-- 跨会话记忆（SQLite + 请求级身份 + 信任分级 + 来源台账；Mem0 可选）
-- Langfuse trace（可选）+ JSONL 结构化日志 + `GET /health`
-- `harness.yml` 配置化 + budget 守卫
-- **HITL 人工审批**（`interrupt_on` + step gate + 前端审批卡片）
-- **前端 Eval 面板** + **Trace 查看器**（JSONL / Langfuse）
+- Research StateGraph 生产调度 + 稳定 Worker Profile 直调
+- 上下文虚拟化：Artifact/Evidence + Tool Output Contract + JIT + glm-5.2 预算
+- Memory：请求级身份、信任分级、来源台账、SUPERSEDE、durable consolidation
+- MCP Capability Plane：四 Server 可切换、真 token、并发 pool、durable Tasks、DB 护栏、env 隔离
+- golden eval（8 指标）+ baseline + GitHub Actions
+- HITL：interrupt_on、step gate、计划审批、Edit-in-the-Loop
+- 前端 Phase 时间线、Eval 面板、Trace 查看器（JSONL / Langfuse）
+- `harness.yml` + budget / timeout / replan 上限 + `GET /health`
 
-### 未覆盖（生产演进，面试中主动说明）
+### 未覆盖（面试里主动说清）
 
-- 用户登录、RBAC、多租户隔离
-- Redis/Postgres Checkpointer 持久化（当前 InMemorySaver）
-- 全量工具 MCP Server 化（当前仅 Tavily；DB/RAGFlow 仍为 LangChain @tool）
-- 任务队列、分布式执行、全局限流
-- 前端 Eval 面板 / Langfuse Trace 查看器
+- 完整企业 OIDC/IdP（现行是 HMAC access token scaffold，已校验 audience/scope/tenant，但不是完整 IdP）
+- 多实例分布式限流与审计汇聚（现行限流是进程内存；审计已落 SQLite）
+- Redis/Postgres LangGraph Checkpointer（任务进度已有 LoopState JSON；图内仍是 InMemorySaver）
+- 远程 MCP replica 的运维部署（客户端已支持 stateless HTTP）
+- 用户登录与产品级 RBAC UI
+- 任务队列 / Celery 级分布式执行
 
-这些能力适合在面试中作为「我知道还缺什么、怎么演进」加分项，而非当前 MVP 范围。
+这些适合作为「我知道还缺什么、下一层怎么演进」，而不是把已经落地的 Gateway、Tasks、DB 护栏说成空白。

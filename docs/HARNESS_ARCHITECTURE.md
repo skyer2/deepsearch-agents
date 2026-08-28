@@ -1,7 +1,8 @@
-# Harness 运行时架构（Phase 20–23）
+# Harness 运行时架构（Phase 20–25）
 
-> **权威模型**：Domain Harness（领域控制面）+ **Research StateGraph Runtime**（生产调度权威）+ Leaf Workers（按步直调）。  
-> LangGraph 跑整个研究工作流（intent → plan → dispatch / Send → synthesis）；DeepAgents 只在需要 filesystem 时组装工人，不再当第二导演。
+> **权威模型**：Domain Harness（领域控制面）+ **Research StateGraph Runtime**（生产调度权威）+ Leaf Workers（按步直调）+ **MCP Capability Plane**（工具治理）。  
+> LangGraph 跑整个研究工作流（intent → plan → dispatch / Send → synthesis）；DeepAgents 只在需要 filesystem 时组装工人，不再当第二导演。  
+> MCP 是 pluggable provider 边界，不污染 Research Domain Model。全貌见 [MCP_SYSTEM.md](./MCP_SYSTEM.md)。
 
 对照：[教学版 deepsearch-agents](https://github.com/didilili/deepsearch-agents) 是一次 `create_deep_agent` 黑盒跑完全程。本仓库在其上加了显式 Loop 之后，Phase 20 把执行入口收成「计划指定谁就直调谁」；当前生产配置 `orchestration.graph_runtime_enabled: true`，调度权威是 Research StateGraph，`AgentHarness._run_legacy_loop()` 仅作回退。
 
@@ -20,6 +21,7 @@
 │ Domain Harness（领域控制面）                                      │
 │  Intent / Plan / Policy / Budget / Memory / Citation / Eval      │
 │  Context Selector · Artifact/Evidence Store · Tool Gateway       │
+│  MCP PolicyContext（tenant/user/run/task/scopes/allowlist）       │
 │  权威业务状态：LoopState → output/session_*/.harness/checkpoint.json│
 └───────────────┬─────────────────────────────────────────────────┘
                 │ research_graph.ainvoke
@@ -38,10 +40,16 @@
 │ mixed researcher          │   │ read_artifact / read_evidence    │
 │ 稳定 Worker Profile        │   │ interrupt_on = 写文件 HITL       │
 │ 最小 tool surface          │   └───────────────┬──────────────────┘
-└──────────────────────────┘                   │
-                                               ▼
-                               Artifact Store + Evidence Store
-                               （原文外置；窗口只留 ref）
+└────────────┬─────────────┘                   │
+             │ tool call                         ▼
+             ▼                     Artifact Store + Evidence Store
+┌────────────────────────────────┐ （原文外置；窗口只留 ref）
+│ MCP / Tool Control Plane       │
+│  Registry · Gateway · Policy   │
+│  stdio pool 或 stateless HTTP  │
+│  Tavily / MySQL / RAGFlow /    │
+│  Files（可切换 LangChain 直连） │
+└────────────────────────────────┘
 ```
 
 配置开关（默认开启）：
@@ -50,6 +58,9 @@
 - `orchestration.persist_loop_state`：checkpoint 写入整份 LoopState
 - `orchestration.graph_runtime_enabled`：**生产调度权威是 Research StateGraph**
 - `context.jit_retrieval_enabled` / `token_budget.model: glm-5.2` / `reversible_compression`
+- `mcp.enabled`：false 时 LangChain 直连；true 时按 Server 走 MCP Gateway
+- `mcp.require_auth`：生产打开后校验 caller access token（不是进程自校验 env）
+- `tools.sql_max_rows` / `sql_table_allowlist`：数据源层截断，不把百万行拉进进程
 
 回退：`HARNESS_GRAPH_RUNTIME=false` 时走 `AgentHarness._run_legacy_loop()`（while 外环）。`HARNESS_DIRECT_WORKER_INVOKE=false` 仅用于对比评测，生产不要关。
 
@@ -74,7 +85,8 @@
 | | [didilili/deepsearch-agents](https://github.com/didilili/deepsearch-agents) | 本仓库 |
 |--|--------------------------------------------------------------------------|--------|
 | 编排 | 主 Agent 自己决定调哪个子 Agent | Domain Harness 出计划；StateGraph 调度；Leaf 直调 |
-| 工具隔离 | 靠 prompt | Worker Profile 物理上没有越权工具；Gateway fail-closed |
+| 工具隔离 | 靠 prompt | Worker Profile 物理上没有越权工具；Gateway fail-closed；MCP 与 LangChain 共用 choke point |
+| 工具接入 | 本地 `@tool` | Registry 隔离 domain；底层可切换 LangChain / MCP；stdio 或 stateless HTTP |
 | 上下文 | 历史全塞 | Brief + JIT；原文在 Artifact Store |
 | 失败 | 模型再试或任务失败 | validate 失败码 + recover / replan + Kill Switch |
 | 引用 / 记忆 / 评测 | 无 | claim→span、分层 Memory、golden eval |
@@ -87,6 +99,21 @@
 
 ## 面试怎么说
 
-> 研搜要的是领域 Harness，不是再造一个 LangGraph。Domain Harness 管计划、校验、护栏、评测和 Context Store；生产调度权威是 Research StateGraph；Leaf Worker 按稳定 Profile 直调。窗口只保留当前决策需要的信息，可重新取得的大内容全部 `artifact://` / `evidence://` 外置。
+> 研搜要的是领域 Harness，不是再造一个 LangGraph。Domain Harness 管计划、校验、护栏、评测和 Context Store；生产调度权威是 Research StateGraph；Leaf Worker 按稳定 Profile 直调。MCP 只标准化 capability 接入，权限和副作用治理仍在 Harness。窗口只保留当前决策需要的信息，可重新取得的大内容全部 `artifact://` / `evidence://` 外置。
 
-相关代码：`app/research/runtime/graph.py`、`app/agent/harness/loop.py`、`context_builder.py`、`artifacts.py`、`evidence_store.py`、`token_counter.py`、`worker_profiles.py`。
+相关代码：`app/research/runtime/graph.py`、`app/agent/harness/loop.py`、`context_builder.py`、`artifacts.py`、`evidence_store.py`、`token_counter.py`、`worker_profiles.py`、`app/mcp/`。
+
+---
+
+## Phase 20–25 落地对照
+
+| Phase | 做了什么 | 权威文档 |
+|-------|----------|----------|
+| 20 | 检索步直调 Leaf Worker；主图不再二次路由 | 本文 |
+| 21 | Research StateGraph 成为生产调度权威 | [RESEARCH_HARNESS.md](./RESEARCH_HARNESS.md) |
+| 22 | Hybrid planning：DIRECT / TEMPLATE / DYNAMIC | [RESEARCH_HARNESS.md](./RESEARCH_HARNESS.md) |
+| 23 | 上下文虚拟化：Artifact/Evidence + glm-5.2 预算 + JIT | [CONTEXT_SYSTEM.md](./CONTEXT_SYSTEM.md) |
+| 24 | Memory 生产门禁：身份四元组、信任分级、来源台账 | [MEMORY_SYSTEM.md](./MEMORY_SYSTEM.md) |
+| 25 | MCP 从 stdio 适配层升级为 Capability Plane | [MCP_SYSTEM.md](./MCP_SYSTEM.md) |
+
+面试运维面：`GET /api/harness/capabilities` 返回当前 `graph_runtime_enabled`、`direct_worker_invoke`、fail-closed / SQL 护栏。
