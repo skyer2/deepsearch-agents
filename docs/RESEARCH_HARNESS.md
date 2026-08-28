@@ -56,16 +56,24 @@ LangGraph 是成熟的 durable workflow runtime 之一，不是行业协议。�
 
 - `IdempotencyRegistry`（checkpointer ≠ 外部副作用 exactly-once）
 - planner / ContextBuilder / MemoryPolicy / Citation / MCP Gateway / Validator / Recovery / Eval
-- `StepCheckpointStore` 仍用于 LoopState 热恢复；LangGraph checkpointer 是 interrupt/resume 权威（Postgres checkpointer 为后续加固）
+- `StepCheckpointStore` 仍用于 LoopState 热恢复；LangGraph checkpointer 是 interrupt/resume 权威（本轮目标见 [RESEARCH_INTELLIGENCE.md](./RESEARCH_INTELLIGENCE.md)）
 
 `AgentHarness._run_legacy_loop()` 仅在 `graph_runtime_enabled: false` 或未安装 langgraph 时回退。
 
-下一步：
+下一步（四个闭环的设计见 [RESEARCH_INTELLIGENCE.md](./RESEARCH_INTELLIGENCE.md)）：
+
+1. Progress Evaluator 进入主图：Evidence → GAP/CONFLICT/ENOUGH → constrained Replanner
+2. `Send` 工人隔离执行 + reducer 合并（不要共享 lock 包住整步）
+3. ResearchState 默认落到 SQLite checkpointer；LoopState JSON 退出 control-critical path
+4. 语义再规划覆盖「只对 failed step 做 execution recovery」
+
+再往后：
 
 1. 把 LoopState 热恢复完全交给 durable LangGraph checkpointer，再删除 `StepCheckpointStore`
 2. 合成后独立 claim / citation verifier 节点
 3. MCP OIDC 接到企业 IdP；HTTP MCP 横向扩展与分布式限流
 4. 删除 `check_subagent_binding` 兼容 metrics 与 Main Agent fallback 残留
+5. 多实例 Redis/Postgres checkpointer（本轮只做单实例 SQLite）
 
 ## 几个 Agent？
 
