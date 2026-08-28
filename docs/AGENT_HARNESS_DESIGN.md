@@ -1,22 +1,33 @@
 # DeepSearch Agents — Agent Harness 企业级升级设计文档
 
-> **版本**: v1.0  
-> **日期**: 2026-07-15  
-> **目标**: 将 `deepsearch-agents` 从教学级多智能体 Demo 升级为适合 2026 年 7 月 Agent 工程师 / Harness 研发岗位面试的企业级参考实现  
+> **版本**: v1.0（设计草案 2026-07-15）  
+> **现行实现**：以代码和下列文档为准，本文保留升级动机与早期路线，**不要把第 8 节旧 MCP 方案、Mem0 默认、HITL「暂不实现」当成当前状态**。
+>
+> | 主题 | 现行文档 |
+> |------|----------|
+> | 运行时 / StateGraph | [HARNESS_ARCHITECTURE.md](./HARNESS_ARCHITECTURE.md) · [RESEARCH_HARNESS.md](./RESEARCH_HARNESS.md) |
+> | 上下文虚拟化 | [CONTEXT_SYSTEM.md](./CONTEXT_SYSTEM.md) |
+> | Memory 生产门禁 | [MEMORY_SYSTEM.md](./MEMORY_SYSTEM.md) |
+> | MCP Capability Plane | [MCP_SYSTEM.md](./MCP_SYSTEM.md) |
+>
+> **日期**: 2026-07-15（草案）；实现已演进到 2026-08 Phase 25  
+> **目标**: 将 `deepsearch-agents` 从教学级多智能体 Demo 升级为适合 Agent / Harness 工程师面试的企业级参考实现  
 > **核心原则**: Harness 过程 **可见、可测、可控**
 
 ---
 
 ## 1. 背景与目标
 
-### 1.1 现状评估
+### 1.1 升级前评估（2026-07）
 
-| 维度 | 当前状态 | 2026 面试要求 |
+下表是草案撰写时的缺口清单，**不是 2026-08 现行状态**。Loop / StateGraph / MCP / Memory / Eval 已落地，见文首文档地图。
+
+| 维度 | 升级前 | 2026 面试要求 |
 |------|----------|---------------|
 | 场景 | 多源深度研搜 ✅ | 合理场景 ✅ |
 | 多智能体 | 一主三从 ✅ | 需能论证设计取舍 |
 | Agent Loop | 隐式（`create_deep_agent` 黑盒） | 显式 Harness Loop |
-| MCP | 无 | 2026 企业默认标准 |
+| MCP | 无 | 2026 企业默认标准；现行：Registry + Gateway + 四 Server 可切换，见 [MCP_SYSTEM.md](./MCP_SYSTEM.md) |
 | 上下文压缩 | 框架内置，未显式化 | 需可控 compression 阶段 |
 | 记忆 | `InMemorySaver` 会话级 | 跨会话 long-term memory |
 | 结果校验 | 无 | validate 阶段 |
@@ -66,39 +77,42 @@ After:  Deep Research 场景下的 Agent Harness 工程实践 — 可见、可�
 │ Layer 3: Harness 层（核心自研）                                    │
 │   Loop 状态机 / Validator / Recovery / ContextBuilder / Compressor│
 ├─────────────────────────────────────────────────────────────────┤
-│ Layer 2: Runtime 层（框架）                                        │
-│   DeepAgents + LangGraph — 主 Agent + 子 Agent + Checkpointer    │
+│ Layer 2: Runtime 层                                                │
+│   Research StateGraph（生产调度权威）+ Leaf Worker（create_agent） │
+│   DeepAgents 不再当第二导演；legacy while 仅回退                     │
 ├─────────────────────────────────────────────────────────────────┤
 │ Layer 1: 工具层                                                  │
-│   MCP Registry → MCP Servers（Tavily / MySQL / File / RAGFlow）  │
-│   Memory Store（Mem0 或 LangGraph Store）                         │
-│   Observability（Langfuse）                                      │
+│   MCP Capability Plane ↔ LangChain tools                         │
+│   Memory Store（默认 SQLite；可选 postgres / mem0）               │
+│   Observability（Langfuse + JSONL）                              │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+现行对照图见 [HARNESS_ARCHITECTURE.md](./HARNESS_ARCHITECTURE.md) 与 README 架构 SVG。
 
 ### 2.2 核心数据流
 
 ```
 用户任务
-  → FastAPI 接收（thread_id）
-  → Harness.run(task, session_id)
-      → [understand] 解析意图
-      → [plan] 生成结构化计划
-      → [build_context] 组装 4 层上下文 + 召回长期记忆
-      → [execute] 逐步执行
-          → 检索步：直调工人图（不经主 Agent task）
-          → 写文件步：主图 + interrupt_on
-          → LoopState 落盘 checkpoint.json
-          → 子 Agent 返回后 → [compress] 压缩结果
-      → [validate] 校验当前 step
-          → 失败 → [recover] 结构化重试
-      → [finalize] 最终校验 + 写入长期记忆
-  → Langfuse trace 全链路记录
+  → FastAPI 接收（thread_id, user_id, tenant_id, project_id）
+  → AgentHarness.run()
+      → 绑定 MemoryIdentity + 签发 MCP access token
+      → [understand] / [plan] → Research Brief
+      → Research StateGraph.ainvoke
+          → dispatch / Send fan-out
+          → 按 Worker Profile 直调 web/db/kb/file
+          → 工具短卡进窗口，原文进 Artifact Store
+          → join → synthesis（JIT read_evidence）
+      → LoopState 落盘 checkpoint.json
+      → [validate] / [recover]；失败可 replan
+      → [finalize] memory remember + consolidation job
+  → Langfuse + JSONL
   → WebSocket 推送 phase 事件
-  → 返回结果 + 审计日志
 ```
 
-### 2.3 目录结构（目标）
+### 2.3 目录结构（2026-07 目标树）
+
+现行目录以 README「项目结构」为准（已增加 `app/research/`、`app/mcp/` Capability Plane、Artifact/Evidence、phase 测试）。下面保留草案目标树，便于对照演进。
 
 ```text
 deepsearch-agents/
@@ -507,63 +521,52 @@ build_context 阶段：
 
 ---
 
-## 8. MCP 工具层
+## 8. MCP 工具层（现行实现，已取代本节原草案）
 
-### 8.1 设计原则
+> 原草案写「先 MCP 化 Tavily，DB/RAGFlow 后期迁移」。代码已经支持四个 Server 按开关切换，并且把 MCP 升级成 **Capability Plane**。细节以 [MCP_SYSTEM.md](./MCP_SYSTEM.md) 为准。
 
-- **渐进迁移**：先 MCP 化 Tavily + File，DB/RAGFlow 保持 `@tool` 后期迁移
-- **Registry 模式**：Harness 通过 registry 发现工具，不硬编码 import
-- **权限边界**：每个 MCP Server 声明 allowed_operations
+### 8.1 设计原则（现行）
 
-### 8.2 MCP Registry
+- **不是全部 MCP 化**：MCP 是 pluggable provider；默认 LangChain 直连，打开开关后按 Server 替换。
+- **Registry 是 Harness 自己的**：Server `list_tools()` 只 describe；`step_types` / permissions / 所有权由 Host policy 决定。
+- **同一 choke point**：LangChain 与 MCP 共用 `db_core` + `ToolGateway`，MCP 路径不能绕过 SQL / step 策略。
+- **MCP 不管治理**：身份、task allowlist、budget、approval、audit、副作用分类重试属于 Harness。
 
-```python
-# app/mcp/registry.py
+### 8.2 现行链路
 
-@dataclass
-class MCPToolDescriptor:
-    name: str
-    description: str
-    server: str                    # MCP server 名称
-    permissions: list[str]           # 如 ["read", "search"]
-    step_types: list[str]          # 适用 step 类型
-
-class MCPRegistry:
-    def __init__(self):
-        self._tools: dict[str, MCPToolDescriptor] = {}
-
-    def register(self, descriptor: MCPToolDescriptor, langchain_tool):
-        self._tools[descriptor.name] = (descriptor, langchain_tool)
-
-    def get_tools_for_step(self, step_type: str) -> list:
-        """按 step 类型动态裁剪可用工具"""
-        return [tool for desc, tool in self._tools.values()
-                if step_type in desc.step_types]
-
-    def list_all(self) -> list[MCPToolDescriptor]:
-        return [desc for desc, _ in self._tools.values()]
+```text
+Worker Profile（最小 tool surface）
+        ▼
+PolicyEngine（principal ∩ task ∩ scopes ∩ step ∩ resource ACL）
+        ▼
+ToolGateway fail-closed
+        ▼
+MCP Gateway（trusted registry / token / breaker / retry taxonomy / durable audit）
+        ▼
+stdio pool（local）或 stateless HTTP（production）
+        ▼
+tavily-mcp / mysql-mcp / ragflow-mcp / files-mcp
+        ▼
+Normalizer + Tool Output Contract → 短卡 + artifact_id
 ```
 
-### 8.3 首批 MCP Server
+四个 Server 均已实现：`app/mcp/servers/{tavily,mysql,ragflow,files}_server.py`。
 
-| Server | 工具 | 迁移来源 | 优先级 |
-|--------|------|----------|--------|
-| `tavily-mcp` | `internet_search` | `app/tools/tavily_tool.py` | P0 |
-| `file-mcp` | `read_file_content`, `generate_markdown`, `convert_md_to_pdf` | `app/tools/` | P0 |
-| `db-mcp` | `list_sql_tables`, `get_table_data`, `execute_sql_query` | `app/tools/db_tools.py` | P1 |
-| `ragflow-mcp` | `get_assistant_list`, `create_ask_delete` | `app/tools/ragflow_tools.py` | P1 |
+### 8.3 已落地、草案里还写成「P1 / 暂不」的部分
 
-### 8.4 MCP Client 桥接
+| 草案说法 | 现行 |
+|----------|------|
+| 仅 Tavily 真 MCP | Tavily / MySQL / RAGFlow / Files 均可 MCP |
+| 进程 env 自校验 OAuth | caller access token（audience/issuer/exp/tenant）；禁止 passthrough |
+| 内存 dict Tasks | SQLite durable store + `tasks_get` |
+| `os.environ.copy()` | per-server env allowlist |
+| Session Pool 单 worker 串行 | `pool_size=3` round-robin + crash 重建 |
+| `execute_sql_query` fetchall | LIMIT / max bytes / timeout / 读副本 / 表白名单 |
+| 未知 tool 手工签名 | `inputSchema` → StructuredTool；未入 policy 则 fail-closed |
 
-```python
-# app/mcp/client.py
-# MCP Server 暴露的能力 → 桥接为 LangChain @tool → 注册到 MCPRegistry
-# 主 Agent 和子 Agent 从 registry 获取工具，而非直接 import
-```
+### 8.4 面试话术
 
-### 8.5 面试话术
-
-> 搜索和文件工具已 MCP 化，通过 Registry 按 step 类型动态发现。DB 和 RAGFlow 计划在下一迭代迁移。这样工具可独立部署、跨 Agent 复用，权限通过 Server 声明式控制。
+> 搜索、库、知识库、文件都可以在 LangChain 直连和 MCP 之间切换，上层 Worker 不受影响。MCP 标准化 discovery/invocation；谁可以调、能调到哪张表、失败能不能重试，仍然是 Harness 的事。
 
 ---
 
@@ -724,22 +727,22 @@ uv run python tests/eval/run_eval.py --tasks tests/eval/tasks.jsonl --output tes
 
 | 能力 | MVP 方案 | 生产方案 |
 |------|----------|----------|
-| SQL 注入防护 | 禁止 DDL/DROP；只允许 SELECT | SQL 白名单 + 参数化 |
-| 文件越界读取 | `resolve_path` 约束 session_dir ✅ 已有 | chroot 沙箱 |
-| 工具权限 | MCP Server 声明 permissions | RBAC + 审批流 |
-| HITL 审批 | 暂不实现 | 高风险 SQL/删除前 `interrupt_on` |
-| 密钥管理 | `.env` | Vault / K8s Secret |
-| 输入消毒 | 基础 prompt 约束 | 内容审核 API |
+| SQL 注入防护 | 禁止 DDL/DROP；只允许 SELECT | SELECT-only + 表白名单 + LIMIT/bytes/timeout + 读副本（已落地，见 sql_guard / db_core） |
+| 文件越界读取 | `resolve_path` 约束 session_dir ✅ 已有 | chroot 沙箱；Resource ACL 已校验 session |
+| 工具权限 | MCP Server 声明 permissions（不可信） | Host PolicyEngine：principal ∩ task ∩ step；trusted registry |
+| HITL 审批 | 已实现 interrupt_on / step gate / 计划审批 | 高风险写操作审批流可再接到企业 IdP |
+| 密钥管理 | `.env` + per-server env allowlist | Vault / K8s Secret |
+| 输入消毒 | 基础 prompt 约束 + `<untrusted>` | 内容审核 API |
 
 ### 11.2 持久化与可靠性
 
 | 能力 | MVP | 生产 |
 |------|-----|------|
-| Checkpointer | `InMemorySaver` | `RedisSaver` / `PostgresSaver` |
+| Checkpointer | `InMemorySaver`（图内）+ LoopState JSON | `RedisSaver` / `PostgresSaver` |
 | 任务队列 | `asyncio.create_task` | Redis Queue / Celery |
-| 幂等性 | 同 thread_id 互斥 ✅ 已有 | 请求去重 + 幂等 key |
-| 超时控制 | 无 | per-step timeout + 全局 deadline |
-| 熔断 | 无 | 工具连续失败 3 次 → circuit break |
+| 幂等性 | 同 thread_id 互斥 + `IdempotencyRegistry` | 请求去重 + 幂等 key |
+| 超时控制 | per-step + 全局 `max_run_sec` | 更细的 deadline 传播 |
+| 熔断 | per-MCP-server circuit breaker ✅ | 跨实例共享状态 |
 
 ### 11.3 成本治理
 
@@ -959,7 +962,7 @@ services:
 
 ## 附录 B：面试 30 秒 Elevator Pitch
 
-> 我做了一个 Deep Research 场景的 Agent Harness 系统。不只是让 Agent 能搜、能写报告，而是自研了 Harness 运行时：显式 Loop 管理、MCP 工具注册、三层上下文压缩、跨会话记忆、结果校验、结构化恢复、Langfuse 全链路 trace 和 10 条 golden task 评测。技术栈是 DeepAgents + LangGraph + FastAPI + React，Harness 层让整个过程可见、可测、可控。
+> 我做了一个 Deep Research 场景的领域 Harness。显式 Loop 管计划、校验、护栏和评测；生产调度权威是 Research StateGraph；工人按稳定 Profile 直调。上下文把原文外置到 Artifact/Evidence，模型只看短卡和 ref。MCP 是可插拔 capability 边界，不是唯一通道；Gateway 做身份、策略、熔断和审计。技术栈是 LangGraph + FastAPI + React，Harness 让过程可见、可测、可控。
 
 ## 附录 C：关键参考
 

@@ -48,6 +48,9 @@ LangGraph 是成熟的 durable workflow runtime 之一，不是行业协议。�
 - **生产入口** `run_deep_agent` → `AgentHarness.run` → `research_graph.ainvoke`（`graph_runtime_enabled: true`）
 - 并行研究任务走图内 `Send`（`research` + 旧数据源步）
 - **Hybrid planning**：DIRECT / TEMPLATE / DYNAMIC。Lead Planner 只输出 objective DAG，不掌握 runtime；来源禁令由 policy 强制
+- **MCP Capability Plane**：Registry / Gateway / PolicyContext / 真 token / server env 隔离 / 并发 pool / durable Tasks；LangChain 与 MCP 共用 ToolGateway。详见 [MCP_SYSTEM.md](./MCP_SYSTEM.md)
+- **Context Virtualization**：Artifact/Evidence Store + glm-5.2 token 预算 + JIT。详见 [CONTEXT_SYSTEM.md](./CONTEXT_SYSTEM.md)
+- **Memory 生产门禁**：身份四元组 + 信任分级 + 来源台账 + SUPERSEDE。详见 [MEMORY_SYSTEM.md](./MEMORY_SYSTEM.md)
 
 刻意保留：
 
@@ -61,7 +64,8 @@ LangGraph 是成熟的 durable workflow runtime 之一，不是行业协议。�
 
 1. 把 LoopState 热恢复完全交给 durable LangGraph checkpointer，再删除 `StepCheckpointStore`
 2. 合成后独立 claim / citation verifier 节点
-3. 删除 `check_subagent_binding` 兼容 metrics 与 Main Agent fallback 残留
+3. MCP OIDC 接到企业 IdP；HTTP MCP 横向扩展与分布式限流
+4. 删除 `check_subagent_binding` 兼容 metrics 与 Main Agent fallback 残留
 
 ## 几个 Agent？
 

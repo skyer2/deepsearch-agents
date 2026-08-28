@@ -3,7 +3,8 @@
 > 对照 `app/agent/harness/context_builder.py`、`compressor.py`、`context_budget.py`、`citations.py`、`orchestration.py`、`loop.py`。
 > 面试精简版与问题清单见 [CONTEXT_INTERVIEW.md](./CONTEXT_INTERVIEW.md)。
 > Phase 19 七项改进对照见 [CONTEXT_IMPROVEMENTS.md](./CONTEXT_IMPROVEMENTS.md)。
-> Phase 23：Context Virtualization — Artifact/Evidence Store + 可恢复压缩 + glm-5.2 tokenizer + JIT。
+> Phase 23：Context Virtualization — Artifact/Evidence Store + 可恢复压缩 + glm-5.2 tokenizer + JIT。  
+> 工具侧短卡合同见 [MCP_SYSTEM.md](./MCP_SYSTEM.md) 的 Tool Output Contract；Memory 见 [MEMORY_SYSTEM.md](./MEMORY_SYSTEM.md)。
 > 原则：**LLM context 只保存当前决策真正需要的信息**；可重新取得的大内容放窗口外，用 ref 按需读取。
 
 ---
@@ -36,23 +37,25 @@ P2  可观测                      → 分层 token、压缩比、CCR 打进 JSO
 
 ### 1.3 一次任务里，上下文怎么转
 
+生产调度权威是 Research StateGraph（`graph_runtime_enabled: true`）；下面是**每一步工人内部**仍要走的上下文卫生，不是主 Agent 自己 while 路由。
+
 ```text
 POST /api/task
         │
- UNDERSTAND → PLAN
+ UNDERSTAND → PLAN → Research Brief
         │
  BUILD_CONTEXT          召回长期记忆 + 来源台账（注入后续每步，不是 system）
         │
- while 逐步执行:
+ StateGraph dispatch / Send fan-out（按 Worker Profile 直调）:
         │
-        ├─ 拼本步 user message（分层 + 预算）
-        ├─ EXECUTE 子 Agent / 工具     ← 子 Agent 自带独立 system，只回传结果
-        ├─ 工人 JSON 解析              ← summary / facts / sources
-        ├─ COMPRESS                    ← 超阈值才压；同时 Citation 登记证据
+        ├─ 拼本步 user message（分层 + glm-5.2 预算）
+        ├─ EXECUTE Leaf Worker / 工具  ← 工人自带独立 system，只回传短卡
+        ├─ 原文进 Artifact Store；工人 JSON：summary / facts / sources / artifact_id
+        ├─ COMPRESS                    ← 超阈值才压；摘要带 artifact_id；Citation 登记
         ├─ VALIDATE / RECOVER
         └─ 压缩结果进 state.step_results，供下一步 prior
         │
- 写报告步                prior 换成【多源证据 digest】，不再用 400 字截断
+ 合成步                  JIT read_evidence；digest 替代 400 字截断
  FINALIZE                Citation 生成 [n] + 参考文献；算 CCR
 ```
 
@@ -60,13 +63,13 @@ POST /api/task
 
 | 东西 | 谁消费 | 生命周期 |
 |---|---|---|
-| `prompts.yml` 的 system | 主 Agent / 子 Agent | 静态，几乎不变 |
-| 每步 **user message** | 主 Agent 这一步 | 每步重建 |
+| `prompts.yml` 的 system | Leaf Worker / 合成工人 | 静态，几乎不变 |
+| 每步 **user message** | 当前工人这一步 | 每步重建 |
 | `compressed_content` | 下一步 prior / 最终拼接 | 本任务内 |
-| evidence digest | 写报告步 | 本任务内，从工人 JSON 汇总 |
+| evidence digest | 合成步 | 本任务内，从工人 JSON 汇总 |
 | `CitationManager.sources` | finalize 参考文献 | 本任务内，另存 `evidence.json` |
 | 长期 Memory | 跨任务 | 见 MEMORY_SYSTEM.md |
-| LangGraph messages | 子 Agent 图内 replay | 进程内 |
+| LangGraph messages | Leaf Worker 图内 replay | 进程内 |
 
 **RAGFlow 不是上下文工程。** 它是工具检索；检索结果进入本步 `StepResult`，再被压缩/digest。
 
