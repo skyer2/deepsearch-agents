@@ -3,7 +3,11 @@ import { App as AntApp, ConfigProvider, theme } from "antd";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { RunStatesPreview } from "./preview/RunStatesPreview";
 import "./styles.css";
+
+const showRunStatesPreview =
+  import.meta.env.DEV && new URLSearchParams(window.location.search).get("preview") === "run-states";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
@@ -37,9 +41,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
         }
       }}
     >
-      <AntApp>
-        <App />
-      </AntApp>
+      <AntApp>{showRunStatesPreview ? <RunStatesPreview /> : <App />}</AntApp>
     </ConfigProvider>
   </React.StrictMode>
 );

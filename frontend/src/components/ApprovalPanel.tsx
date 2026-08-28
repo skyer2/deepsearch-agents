@@ -1,4 +1,4 @@
-import { CheckOutlined, CloseOutlined, EditOutlined, SafetyCertificateOutlined } from "@ant-design/icons";
+import { CheckOutlined, CloseOutlined, EditOutlined, PauseCircleOutlined } from "@ant-design/icons";
 import { Button, Card, Input, Space, Tag, Typography } from "antd";
 import { useEffect, useState } from "react";
 import type { HitlInterruptPayload } from "../types";
@@ -88,17 +88,17 @@ export function ApprovalPanel({
       className="hitl-approval-panel"
       title={
         <Space>
-          <SafetyCertificateOutlined aria-hidden />
-          <span>HITL 人工审批</span>
+          <PauseCircleOutlined aria-hidden />
+          <span>任务已暂停 · 需要人工审批</span>
           <Tag color="gold">{gateLabel}</Tag>
-          {isEditable ? <Tag color="purple">支持 Edit-in-the-Loop</Tag> : null}
+          {isEditable ? <Tag>可编辑后继续</Tag> : null}
         </Space>
       }
     >
       <Typography.Paragraph type="secondary">
         {isIntentClarification
-          ? "任务理解存在歧义或置信度较低。请确认交付形式（对话回答 / Markdown / PDF），或在 JSON 中编辑 deliverable 与 slots。"
-          : "检测到高风险或多意图任务。可批准、拒绝，或在启用时编辑计划/步骤后提交（Dynamic Re-plan）。"}
+          ? "任务理解存在歧义或置信度较低。确认前执行已冻结，进度条不会继续跳动。"
+          : "高风险步骤已在副作用前冻结。批准、拒绝或编辑后才会继续，这与 GitHub / LangGraph interrupt 的审批流一致。"}
       </Typography.Paragraph>
 
       <ul className="hitl-action-list">

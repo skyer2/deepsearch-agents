@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cancelTask, listSessionFiles, resumeHitl, startTask, uploadSessionFiles } from "../lib/api";
 import { WS_BASE_URL, wsUrl } from "../lib/config";
 import { createThreadId, getStoredThreadId, storeThreadId } from "../lib/thread";
+import { deriveRunStatus } from "../lib/runStatus";
 import type {
   ConnectionState,
   HitlInterruptPayload,
@@ -238,10 +239,10 @@ export function useDeepAgentSession() {
       refreshFiles().catch((error: unknown) => {
         setLastError(error instanceof Error ? error.message : "文件列表刷新失败");
       });
-    }, isRunning ? 2500 : 6000);
+    }, isRunning && !hitlPending ? 2500 : 8000);
 
     return () => window.clearInterval(timer);
-  }, [isRunning, refreshFiles, sessionPath]);
+  }, [hitlPending, isRunning, refreshFiles, sessionPath]);
 
   const submitTask = useCallback(
     async (query: string) => {
@@ -376,6 +377,19 @@ export function useDeepAgentSession() {
     };
   }, [events, files.length]);
 
+  const runStatus = useMemo(
+    () =>
+      deriveRunStatus({
+        isRunning,
+        isCancelling,
+        hitlPending,
+        events,
+        result,
+        taskFailed: Boolean(taskFailure)
+      }),
+    [events, hitlPending, isCancelling, isRunning, result, taskFailure]
+  );
+
   return {
     connectionState,
     events,
@@ -392,6 +406,7 @@ export function useDeepAgentSession() {
     resetSession,
     discardFailedTask,
     result,
+    runStatus,
     sessionPath,
     stats,
     cancelCurrentTask,

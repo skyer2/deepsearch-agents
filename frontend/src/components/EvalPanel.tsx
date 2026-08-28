@@ -102,11 +102,11 @@ export function EvalPanel() {
               value={report ? formatMetric(report, metric.key, metric.scale, metric.suffix) : "-"}
             />
             {comparison && typeof comparison[metric.key] === "number" ? (
-              <Tag color={comparison[metric.key] >= 0 ? "success" : "error"}>
-                Δ {(comparison[metric.key] as number) >= 0 ? "+" : ""}
+              <Tag color={(comparison[metric.key] ?? 0) >= 0 ? "success" : "error"}>
+                Δ {(comparison[metric.key] ?? 0) >= 0 ? "+" : ""}
                 {metric.suffix === "%"
-                  ? `${((comparison[metric.key] as number) * 100).toFixed(1)}%`
-                  : (comparison[metric.key] as number).toFixed(3)}
+                  ? `${(((comparison[metric.key] ?? 0) as number) * 100).toFixed(1)}%`
+                  : ((comparison[metric.key] ?? 0) as number).toFixed(3)}
               </Tag>
             ) : null}
           </Card>

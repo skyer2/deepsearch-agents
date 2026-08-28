@@ -642,23 +642,24 @@ def report_phase(self, phase: str, status: str, **data):
 }
 ```
 
-### 9.5 前端 Phase 时间线（目标 UI）
+### 9.5 前端 Phase 时间线（现行 UI）
+
+进度条跟任务状态机走，**HITL 期间冻结**，不再用无限扫光当「还在跑」。
 
 ```
-[10:30:01] 🧠 understand  ✓  意图=行业报告 (0.8s)
-[10:30:02] 📋 plan        ✓  3步计划 (1.2s)
-[10:30:03] 💾 memory      ✓  召回 2 条历史记忆
-[10:30:04] ⚡ execute     →  Step 1/3: 网络搜索
-[10:30:08] 🗜️ compress    ✓  4200→480 tokens (78% 压缩)
-[10:30:08] ⚡ execute     ✓  Step 1/3 (4.2s)
-[10:30:09] ⚡ execute     →  Step 2/3: 数据库查询
-[10:30:11] ❌ validate    ✗  SQL 返回空
-[10:30:12] 🔄 recover     →  重试: 先 list_tables
-[10:30:15] ⚡ execute     ✓  Step 2/3 (重试成功)
-[10:30:16] ✅ validate    ✓  全部通过
-[10:30:20] 📄 finalize    ✓  report.pdf 已生成
-[10:30:20] 💾 memory      ✓  保存 5 条事实
+idle → running（确定性 %）→ awaiting_approval（暂停、无动画）→ running → completed
 ```
+
+时间线展示：
+
+```
+understand  完成
+plan        完成
+execute     已暂停  Step 2/3 · database_query
+```
+
+审批卡片吸顶；顶栏 / 侧栏显示「等待审批」。原始事件日志默认折叠。
+实现：`frontend/src/lib/runStatus.ts`、`phaseProgress.ts`、`components/RunProgress.tsx`。
 
 ---
 
