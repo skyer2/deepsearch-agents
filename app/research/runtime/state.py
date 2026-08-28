@@ -50,6 +50,8 @@ class ResearchState(TypedDict):
     needs_plan_review: bool
     progress: str
     quality_passed: bool
+    progress_assessment: dict[str, Any]
+    replan_exhausted: bool
 
 
 class WorkerTaskState(TypedDict):
@@ -108,4 +110,6 @@ def empty_research_state(
         "needs_plan_review": False,
         "progress": "run",
         "quality_passed": False,
+        "progress_assessment": {},
+        "replan_exhausted": False,
     }

@@ -33,7 +33,7 @@ Phase 18 对照业界的短文：[MEMORY_ARCHITECTURE.md](./MEMORY_ARCHITECTURE.
 
 ### 4. 收尾 15 秒（主动暴露边界，比装成「已经企业级」加分）
 
-> 还没做的也很清楚：图状态仍是进程级 InMemorySaver，要上多副本得换 Redis Checkpointer；巩固还是规则衰减不是 sleep-time LLM；产品登录我们还没有，但记忆层隔离已经按租户和用户切开，身份必须从 API 传入。
+> 还没做的也很清楚：图状态默认是单实例 SQLite checkpointer，要上多副本得换 Redis/Postgres；巩固还是规则衰减不是 sleep-time LLM；产品登录我们还没有，但记忆层隔离已经按租户和用户切开，身份必须从 API 传入。
 
 ### 5. 一分钟版（时间不够就用这个）
 
@@ -165,7 +165,7 @@ A. 按阶段：先强制 API 传真实 user_id；Checkpointer 换 Redis；来源
 |---|---|---|---|
 | F1 | Mem0 vs Letta vs Zep，你们为什么自研？ | 技术选型 | 阶段论：先 compaction+curated；语义层自研足够；图谱/OS 等真有多跳再上 |
 | F2 | 要不要把 Memory 放进 LangGraph Store？ | 图 vs Harness | Harness 是显式 loop，Memory 是旁路存储；图内 Store 和我们的 Checkpointer 职责不同 |
-| F3 | InMemorySaver 算记忆吗？ | 概念混淆 | 不算长期记忆，只是图会话；进程一死就没了 |
+| F3 | SQLite checkpointer 算记忆吗？ | 概念混淆 | 不算长期记忆，只是图会话控制状态 |
 | F4 | 如果重做，你还坚持 SQLite 吗？ | 演进 | Demo/单机 SQLite 合理；多副本换 Postgres + 向量扩展或独立向量库，门面不变 |
 
 ### G. 开放题（展示判断力）
@@ -193,5 +193,5 @@ A. 按阶段：先强制 API 传真实 user_id；Checkpointer 换 Redis；来源
 
 - 不要说「我们用向量库做了记忆」——立刻会被问注入和过期，答不上就穿帮。  
 - 不要把 Checkpointer、JSONL、RAG 都叫 Memory。  
-- 不要宣称已经企业级完备；主动讲 InMemorySaver 和未做登录。  
+- 不要宣称已经企业级完备；主动讲单实例 SQLite checkpointer 和未做登录。  
 - 不要贬低 Mem0；说「阶段不匹配」，不是「它不好」。

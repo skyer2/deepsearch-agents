@@ -12,7 +12,6 @@ from typing import Any, Literal
 from app.agent.harness.planner import build_plan, understand_task
 from app.agent.harness.state import ExecutionPlan
 from app.research.runtime.scheduler import (
-    all_retrieval_done,
     annotate_plan_tasks,
     next_synthesis_step,
     ready_research_steps,
@@ -84,10 +83,6 @@ def _max_replan(state: ResearchState) -> int:
     return int(budget.get("max_replan_count") or 3)
 
 
-def _has_failed_tasks(status: dict[str, str]) -> bool:
-    return any(value == "failed" for value in status.values())
-
-
 def route_dispatch(state: ResearchState) -> list[Any] | str:
     from langgraph.types import Send
 
@@ -118,10 +113,52 @@ def route_dispatch(state: ResearchState) -> list[Any] | str:
                 )
             )
         return sends
-    if next_synthesis_step(plan, status) is not None and all_retrieval_done(plan, status):
-        return "synthesize"
-    if _has_failed_tasks(status) and int(state.get("replan_count") or 0) < _max_replan(state):
+    return "progress"
+
+
+def progress_node(state: ResearchState) -> dict[str, Any]:
+    from app.research.planning.progress import assess_progress
+
+    plan = _plan_from_state(state)
+    assessment = assess_progress(
+        plan,
+        task_status=dict(state.get("task_status") or {}),
+        worker_results=list(state.get("worker_results") or []),
+        query=str(state.get("task_query") or ""),
+        aborted=bool(state.get("status") == "aborted" or state.get("abort_reason")),
+    )
+    return {
+        "progress_assessment": assessment.to_dict(),
+        "progress": "progress_eval",
+        "abort_reason": state.get("abort_reason")
+        or (assessment.reason if assessment.verdict == "abort" else ""),
+    }
+
+
+def route_progress(state: ResearchState) -> str:
+    if state.get("status") == "aborted" or state.get("abort_reason"):
+        return "abort"
+    assessment = dict(state.get("progress_assessment") or {})
+    verdict = str(assessment.get("verdict") or "enough")
+    plan = _plan_from_state(state)
+    status = dict(state.get("task_status") or {})
+    replan_count = int(state.get("replan_count") or 0)
+    exhausted = bool(state.get("replan_exhausted"))
+    if verdict == "abort":
+        return "abort"
+    if verdict == "run" and plan is not None and ready_research_steps(plan, status):
+        return "dispatch"
+    can_replan = (
+        verdict == "gap"
+        and not exhausted
+        and replan_count < _max_replan(state)
+    )
+    if can_replan:
         return "replan"
+    if plan is not None:
+        nxt = next_synthesis_step(plan, status, allow_failed_deps=True)
+        if nxt is not None:
+            return "synthesize"
     return "quality_gate"
 
 
@@ -145,7 +182,6 @@ def research_worker_node(state: dict[str, Any]) -> dict[str, Any]:
         ],
         "task_status": {task_id: "done"},
         "evidence_refs": [task_id] if task_id else [],
-        "progress": "worker",
     }
 
 
@@ -211,6 +247,7 @@ def compile_research_graph(
         builder.add_node("plan_validate", runtime.node_plan_validate)
         builder.add_node("dispatch", runtime.node_dispatch)
         builder.add_node("research_worker", runtime.node_research_worker)
+        builder.add_node("progress", runtime.node_progress)
         builder.add_node("synthesize", runtime.node_synthesize)
         builder.add_node("replan", runtime.node_replan)
         builder.add_node("quality_gate", runtime.node_quality_gate)
@@ -223,6 +260,7 @@ def compile_research_graph(
         builder.add_node("plan_validate", plan_validate_node)
         builder.add_node("dispatch", dispatch_node)
         builder.add_node("research_worker", _worker)
+        builder.add_node("progress", progress_node)
         builder.add_node("synthesize", synthesize_node)
         builder.add_node("replan", replan_node)
         builder.add_node("quality_gate", quality_gate_node)
@@ -241,9 +279,14 @@ def compile_research_graph(
     builder.add_conditional_edges(
         "dispatch",
         route_dispatch,
-        ["research_worker", "synthesize", "replan", "quality_gate", "abort", "finalize"],
+        ["research_worker", "progress", "abort", "finalize"],
     )
     builder.add_edge("research_worker", "dispatch")
+    builder.add_conditional_edges(
+        "progress",
+        route_progress,
+        ["dispatch", "replan", "synthesize", "quality_gate", "abort"],
+    )
     builder.add_edge("synthesize", "dispatch")
     builder.add_edge("replan", "plan_validate")
     builder.add_edge("quality_gate", "finalize")
@@ -279,5 +322,7 @@ __all__ = [
     "initial_graph_state",
     "intent_node",
     "plan_node",
+    "progress_node",
     "route_dispatch",
+    "route_progress",
 ]

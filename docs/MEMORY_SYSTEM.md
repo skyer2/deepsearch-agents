@@ -31,7 +31,7 @@ P3  Agent 越用越会查             → Procedural / HITL 沉淀
 | **长期记忆 Memory** | `MemoryStore`（SQLite 默认） | 跨 session、跨任务 | curated fact、偏好、HITL 教训、已查来源 |
 | **工作记忆 Compaction** | `ContextCompressor` + `ContextBuilder` | 单次任务内 | 步骤摘要、evidence digest、token 预算 |
 | **会话续跑 Checkpoint** | `StepCheckpointStore`（`output/session_*/.harness/checkpoint.json`） | 同 session 同任务指纹 | 已完成步骤，进程重启可续 |
-| **图内 Checkpointer** | LangGraph `InMemorySaver` | 进程内、Research StateGraph / Leaf | 图内 interrupt 与 worker messages replay |
+| **图内 Checkpointer** | LangGraph SQLite（失败回退 `InMemorySaver`） | 单实例文件、Research StateGraph interrupt/resume | 图内控制流；多副本需 Redis/Postgres |
 | **可观测 Trace** | JSONL `logs/traces/{session_id}.jsonl` | 离线分析 | phase 事件，含 memory 指标 |
 
 **RAGFlow 不是 Memory。** RAG 是外部、多人共享、相对静态的知识库，走工具/子 Agent，结果进入本次 `step_results`。Memory 是「这个用户 / 这个项目 / 这个 Agent 自己」的状态。
@@ -329,7 +329,7 @@ tests/test_harness_phase12/15/18_memory.py
 
 ## 九、明确还没做的（面试主动说）
 
-- LangGraph 仍是进程级 `InMemorySaver`，多副本要换 Redis/Postgres Checkpointer（这是 **会话图状态**，不是长期 Memory）。
+- LangGraph 图状态默认落到单实例 SQLite checkpointer，多副本要换 Redis/Postgres（这是 **会话图状态**，不是长期 Memory）。
 - 巩固是规则（半衰期 / 命中次数），不是 Letta 那种 sleep-time LLM agent。
 - 产品层登录 / RBAC 还没有；记忆层已能按 tenant/user 隔离，但身份必须由 API 传入。
 - Mem0 仍是可选 sidecar，核心路径是自研 SQLite。

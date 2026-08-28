@@ -55,6 +55,10 @@ def harness_capabilities() -> dict[str, Any]:
             "direct_worker_invoke": getattr(config, "direct_worker_invoke", True),
             "persist_loop_state": getattr(config, "persist_loop_state", True),
             "graph_runtime_enabled": getattr(config, "graph_runtime_enabled", False),
+            "progress_eval_enabled": getattr(config, "progress_eval_enabled", True),
+            "graph_checkpoint_backend": getattr(
+                config, "graph_checkpoint_backend", "sqlite"
+            ),
         },
         "planner": {
             "llm_enabled": config.planner_llm_enabled,
@@ -64,6 +68,7 @@ def harness_capabilities() -> dict[str, Any]:
             "plan_validation": True,
             "hybrid_enabled": getattr(config, "planner_hybrid_enabled", True),
             "dynamic_lead_planner": getattr(config, "planner_dynamic_lead_enabled", True),
+            "progress_evaluator": getattr(config, "progress_eval_enabled", True),
         },
         "safety": {
             "tools_fail_closed": config.tools_fail_closed,

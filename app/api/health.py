@@ -161,6 +161,10 @@ async def collect_health() -> dict[str, Any]:
                 "direct_worker_invoke": getattr(config, "direct_worker_invoke", True),
                 "persist_loop_state": getattr(config, "persist_loop_state", True),
                 "graph_runtime_enabled": getattr(config, "graph_runtime_enabled", False),
+                "progress_eval_enabled": getattr(config, "progress_eval_enabled", True),
+                "graph_checkpoint_backend": getattr(
+                    config, "graph_checkpoint_backend", "sqlite"
+                ),
             },
             "planner": {
                 "llm_enabled": config.planner_llm_enabled,

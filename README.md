@@ -519,6 +519,7 @@ git checkout main
 ### 已覆盖
 
 - Research StateGraph 生产调度 + 稳定 Worker Profile 直调
+- Progress Evaluator 进主图：语义缺口 / 冲突 → constrained PlanPatch；工人隔离并行 + SQLite ResearchState
 - 上下文虚拟化：Artifact/Evidence + Tool Output Contract + JIT + glm-5.2 预算
 - Memory：请求级身份、信任分级、来源台账、SUPERSEDE、durable consolidation
 - MCP Capability Plane：四 Server 可切换、真 token、并发 pool、durable Tasks、DB 护栏、env 隔离
@@ -531,7 +532,7 @@ git checkout main
 
 - 完整企业 OIDC/IdP（现行是 HMAC access token scaffold，已校验 audience/scope/tenant，但不是完整 IdP）
 - 多实例分布式限流与审计汇聚（现行限流是进程内存；审计已落 SQLite）
-- Redis/Postgres LangGraph Checkpointer（任务进度已有 LoopState JSON；图内仍是 InMemorySaver）
+- Redis/Postgres 多实例 LangGraph Checkpointer（现行默认是单实例 SQLite 文件；LoopState JSON 仍作副作用热恢复）
 - 远程 MCP replica 的运维部署（客户端已支持 stateless HTTP）
 - 用户登录与产品级 RBAC UI
 - 任务队列 / Celery 级分布式执行

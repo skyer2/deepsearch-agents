@@ -111,6 +111,8 @@ def test_harness_config_orchestration():
     assert cfg.direct_worker_invoke is True
     assert cfg.persist_loop_state is True
     assert cfg.graph_runtime_enabled is True
+    assert cfg.progress_eval_enabled is True
+    assert cfg.graph_checkpoint_backend == "sqlite"
     print("[OK] orchestration config loaded")
 
 
