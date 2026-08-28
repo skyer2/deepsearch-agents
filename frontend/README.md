@@ -2,6 +2,19 @@
 
 React + Vite + Tailwind CSS + Ant Design frontend for the DeepSearch Agents FastAPI backend.
 
+生产交互按任务状态机渲染，而不是「只要没结束就一直转圈」：
+
+| 状态 | UI |
+|------|----|
+| `idle` | 待命 |
+| `running` | 按 Harness Phase 显示**确定性**进度（0–100%） |
+| `awaiting_approval` | HITL 暂停：进度条冻结、计时停止、无闪烁/扫光 |
+| `cancelling` / `completed` / `failed` | 对应静态结果态 |
+
+HITL 审批卡片会吸顶，输入框提示「任务已暂停」。原始 WebSocket 事件默认折进「原始事件日志」，主界面只保留阶段时间线。
+
+开发时可用 `http://localhost:5173/?preview=run-states` 对照运行中 / 暂停 / 完成三种进度条。
+
 ## Run
 
 ```bash
@@ -23,4 +36,5 @@ VITE_WS_BASE_URL=ws://localhost:8000
 - `POST /api/upload`
 - `GET /api/files`
 - `GET /api/download`
-- `WebSocket /ws/{thread_id}`
+- `POST /api/task/{thread_id}/resume`
+- `WebSocket /ws/{thread_id}`（`phase` / `hitl_interrupt` / `task_result`）

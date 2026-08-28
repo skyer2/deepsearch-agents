@@ -10,13 +10,17 @@ import {
   FilePdfOutlined,
   FileSearchOutlined,
   FileTextOutlined,
+  PauseCircleOutlined,
   StopOutlined,
   ToolOutlined,
 } from "@ant-design/icons";
 import { Button, Tooltip } from "antd";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { getDownloadUrl } from "../lib/api";
+import { computePhaseProgress } from "../lib/phaseProgress";
+import { type RunStatus } from "../lib/runStatus";
 import { MarkdownRenderer } from "./MarkdownRenderer";
+import { RunProgress } from "./RunProgress";
 import type { MonitorMessage, OutputFile } from "../types";
 
 export interface ChatTurn {
@@ -31,6 +35,7 @@ export interface ChatTurn {
 
 interface ConversationThreadProps {
   onUseExample: (prompt: string) => void;
+  runStatus?: RunStatus;
   turns: ChatTurn[];
 }
 
@@ -129,7 +134,7 @@ function getLastEventTime(
 function getThinkingDuration(
   events: MonitorMessage[],
   fallbackStart: string,
-  isRunning: boolean,
+  freezeClock: boolean,
   now: number,
 ): string {
   const startedAt =
@@ -138,7 +143,9 @@ function getThinkingDuration(
     now;
   const finishedAt =
     getLastEventTime(events, "task_result") ??
-    (!isRunning ? getLastEventTime(events) : null) ??
+    (freezeClock
+      ? getLastEventTime(events, "hitl_interrupt") ?? getLastEventTime(events)
+      : null) ??
     now;
   return formatDuration(finishedAt - startedAt);
 }
@@ -161,6 +168,9 @@ function EventIcon({ event }: { event: string }) {
   }
   if (event === "error") {
     return <CloseCircleOutlined aria-hidden />;
+  }
+  if (event === "hitl_interrupt") {
+    return <PauseCircleOutlined aria-hidden />;
   }
   return <ClockCircleOutlined aria-hidden />;
 }
@@ -263,44 +273,21 @@ function ArtifactShelf({ files }: { files: OutputFile[] }) {
   );
 }
 
-function ThinkingLoader({ durationLabel }: { durationLabel: string }) {
-  return (
-    <div
-      className="thinking-loader"
-      aria-live="polite"
-      aria-label="正在生成回复"
-    >
-      <div className="loader-status">
-        <span className="loader-pulse" aria-hidden />
-        <strong>正在研搜</strong>
-        <span className="loader-duration">已思考 {durationLabel}</span>
-        <span className="loader-dots" aria-hidden>
-          <i />
-          <i />
-          <i />
-        </span>
-      </div>
-      <div className="loader-track" aria-hidden />
-      <ul className="loader-steps" aria-hidden>
-        <li>理解问题</li>
-        <li>调度工具</li>
-        <li>汇总答案</li>
-      </ul>
-    </div>
-  );
-}
-
 function AssistantMessage({
   events,
   files,
   isRunning,
   result,
+  runStatus,
   timestamp,
-}: Pick<ChatTurn, "events" | "files" | "isRunning" | "result" | "timestamp">) {
+}: Pick<ChatTurn, "events" | "files" | "isRunning" | "result" | "timestamp"> & {
+  runStatus: RunStatus;
+}) {
   const [now, setNow] = useState(Date.now());
+  const clockLive = runStatus === "running" || runStatus === "cancelling";
 
   useEffect(() => {
-    if (!isRunning) {
+    if (!clockLive) {
       return;
     }
 
@@ -309,13 +296,25 @@ function AssistantMessage({
     }, 1000);
 
     return () => window.clearInterval(timer);
-  }, [isRunning]);
+  }, [clockLive]);
 
-  const durationLabel = getThinkingDuration(events, timestamp, isRunning, now);
+  const freezeClock = !clockLive;
+  const durationLabel = getThinkingDuration(events, timestamp, freezeClock, now);
   const isCancelled = events.some((event) => event.event === "task_cancelled");
-  const syncLabel = isRunning
-    ? `生成中 · 思考 ${durationLabel}`
-    : `${isCancelled ? "已取消" : "已同步"} · 用时 ${durationLabel}`;
+  const progress = useMemo(
+    () =>
+      computePhaseProgress(events, {
+        paused: runStatus === "awaiting_approval",
+        completed: runStatus === "completed"
+      }),
+    [events, runStatus]
+  );
+  const syncLabel =
+    runStatus === "awaiting_approval"
+      ? `已暂停 · ${durationLabel}`
+      : clockLive
+        ? `生成中 · 用时 ${durationLabel}`
+        : `${isCancelled ? "已取消" : "已同步"} · 用时 ${durationLabel}`;
 
   return (
     <article className="chat-message chat-message--assistant">
@@ -345,9 +344,17 @@ function AssistantMessage({
             <MarkdownRenderer content={result} />
           </div>
         ) : (
-          <div className="assistant-answer assistant-answer--pending">
-            {isRunning ? (
-              <ThinkingLoader durationLabel={durationLabel} />
+          <div
+            className={`assistant-answer assistant-answer--pending ${
+              runStatus === "awaiting_approval" ? "assistant-answer--paused" : ""
+            }`}
+          >
+            {isRunning || runStatus === "awaiting_approval" ? (
+              <RunProgress
+                durationLabel={durationLabel}
+                progress={progress}
+                runStatus={runStatus}
+              />
             ) : (
               "任务完成后会在这里显示最终回复。"
             )}
@@ -372,8 +379,19 @@ function AssistantMessage({
   );
 }
 
+function resultStatus(turn: ChatTurn): RunStatus {
+  if (turn.events.some((event) => event.event === "error")) {
+    return "failed";
+  }
+  if (turn.result || turn.events.some((event) => event.event === "task_result")) {
+    return "completed";
+  }
+  return "idle";
+}
+
 export function ConversationThread({
   onUseExample,
+  runStatus = "idle",
   turns,
 }: ConversationThreadProps) {
   if (turns.length === 0) {
@@ -430,6 +448,7 @@ export function ConversationThread({
             files={turn.files}
             isRunning={turn.isRunning}
             result={turn.result}
+            runStatus={turn.isRunning ? runStatus : resultStatus(turn)}
             timestamp={turn.timestamp}
           />
         </div>

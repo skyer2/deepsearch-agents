@@ -9,6 +9,7 @@ import type { UploadFile } from "antd";
 import type { UploadedItem } from "../types";
 
 interface ChatComposerProps {
+  isAwaitingApproval?: boolean;
   isCancelling: boolean;
   isRunning: boolean;
   isUploading: boolean;
@@ -48,6 +49,7 @@ function uniqueUploadedItems(items: UploadedItem[]): UploadedItem[] {
 }
 
 export function ChatComposer({
+  isAwaitingApproval = false,
   isCancelling,
   isRunning,
   isUploading,
@@ -106,6 +108,12 @@ export function ChatComposer({
         </div>
       ) : null}
 
+      {isAwaitingApproval ? (
+        <div className="composer-pause-hint" role="status">
+          任务已暂停，等待人工审批。批准或拒绝后才会继续，期间不会刷新进度动画。
+        </div>
+      ) : null}
+
       <div className="composer-shell">
         <textarea
           aria-label="研搜任务"
@@ -153,7 +161,7 @@ export function ChatComposer({
             </Upload>
           </div>
 
-          <Tooltip title={isRunning ? "取消当前任务" : "发送任务"}>
+          <Tooltip title={isAwaitingApproval ? "取消已暂停的任务" : isRunning ? "取消当前任务" : "发送任务"}>
             <Button
               aria-label={isRunning ? "取消当前任务" : "发送任务"}
               className={isRunning ? "send-button send-button--cancel" : "send-button"}

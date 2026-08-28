@@ -149,8 +149,8 @@ CI 在每次 push/PR 时自动跑 dry-run eval，**TSR 下降 > 5% 则阻断合�
 ### 面试必须能演示的 5 件事
 
 1. 完整链路：搜索 + DB + 生成 PDF
-2. 前端 Phase 时间线（含 Step 1/3）
-3. **HITL 审批**：数据库步骤 gate 或 `generate_markdown` interrupt_on 弹窗
+2. 前端 Phase 时间线（确定性进度；HITL 审批时冻结，不闪烁）
+3. **HITL 审批**：数据库步骤 gate 或 `generate_markdown` interrupt_on；任务进入「等待审批」暂停态
 4. Eval 跑分报告（侧边栏 **Eval 面板**）
 5. Trace 查看器（JSONL + Langfuse 外链）
 
@@ -290,7 +290,7 @@ CI 在每次 push/PR 时自动跑 dry-run eval，**TSR 下降 > 5% 则阻断合�
 | MCP            | `mcp` SDK + Gateway / Pool / Tasks               | stdio（local）或 streamable-http；四 Server 可切换 |
 | Harness 配置   | `harness.yml`                                    | 编排 / 上下文 / 记忆 / MCP / SQL / HITL / budget |
 | 评测           | `tests/eval/`                                    | golden task + 8 指标 + baseline 回归 |
-| 前端           | `React` / `Vite` / `Ant Design` / `Tailwind CSS` | 对话式研搜、Phase 时间线、HITL、Eval、Trace |
+| 前端           | `React` / `Vite` / `Ant Design` / `Tailwind CSS` | 对话式研搜、确定性 Phase 进度、HITL 暂停态、Eval、Trace |
 | 依赖管理       | `uv` / `pnpm`                                    | Python 后端和前端依赖 |
 
 ## 📁 项目结构
@@ -523,8 +523,8 @@ git checkout main
 - Memory：请求级身份、信任分级、来源台账、SUPERSEDE、durable consolidation
 - MCP Capability Plane：四 Server 可切换、真 token、并发 pool、durable Tasks、DB 护栏、env 隔离
 - golden eval（8 指标）+ baseline + GitHub Actions
-- HITL：interrupt_on、step gate、计划审批、Edit-in-the-Loop
-- 前端 Phase 时间线、Eval 面板、Trace 查看器（JSONL / Langfuse）
+- HITL：interrupt_on、step gate、计划审批、Edit-in-the-Loop；前端按 `idle / running / awaiting_approval` 冻结进度
+- 前端确定性 Phase 进度条、Eval 面板、Trace 查看器（JSONL / Langfuse）
 - `harness.yml` + budget / timeout / replan 上限 + `GET /health`
 
 ### 未覆盖（面试里主动说清）

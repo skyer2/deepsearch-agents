@@ -9,6 +9,7 @@ import {
   FileSearchOutlined,
   LineChartOutlined,
   MessageOutlined,
+  PauseCircleOutlined,
   ToolOutlined
 } from "@ant-design/icons";
 import { Alert, App as AntApp, Button } from "antd";
@@ -22,6 +23,7 @@ import { EventStream } from "./components/EventStream";
 import { TraceViewer } from "./components/TraceViewer";
 import { API_BASE_URL, WS_BASE_URL } from "./lib/config";
 import { useDeepAgentSession } from "./hooks/useDeepAgentSession";
+import { isLiveRun, runStatusLabel } from "./lib/runStatus";
 import type { ConnectionState, UploadedItem, WorkspaceTab } from "./types";
 
 function connectionLabel(state: ConnectionState): string {
@@ -163,7 +165,9 @@ export default function App() {
     setWorkspace("chat");
   }
 
-  async function handleHitlDecisions(decisions: Array<{ type: "approve" | "reject" }>) {
+  async function handleHitlDecisions(
+    decisions: Array<{ type: "approve" | "reject" | "edit"; edited_action?: Record<string, unknown> }>
+  ) {
     try {
       await session.submitHitlDecisions(decisions);
       message.success("审批已提交，任务继续执行");
@@ -230,15 +234,26 @@ export default function App() {
             <span>WebSocket</span>
             <strong>{connectionLabel(session.connectionState)}</strong>
           </div>
-          <div className="sidebar-status">
-            <BranchesOutlined aria-hidden />
-            <span>助手调度</span>
-            <strong>{session.stats.assistantEvents}</strong>
+          <div className={`sidebar-status sidebar-status--${session.runStatus}`}>
+            {session.runStatus === "awaiting_approval" ? (
+              <PauseCircleOutlined aria-hidden />
+            ) : session.runStatus === "failed" ? (
+              <CloseCircleOutlined aria-hidden />
+            ) : (
+              <BranchesOutlined aria-hidden />
+            )}
+            <span>任务态</span>
+            <strong>{runStatusLabel(session.runStatus)}</strong>
           </div>
           <div className="sidebar-status">
             <ToolOutlined aria-hidden />
             <span>工具调用</span>
             <strong>{session.stats.toolEvents}</strong>
+          </div>
+          <div className="sidebar-status">
+            <BranchesOutlined aria-hidden />
+            <span>助手调度</span>
+            <strong>{session.stats.assistantEvents}</strong>
           </div>
           <div className={session.stats.errorEvents > 0 ? "sidebar-status sidebar-status--error" : "sidebar-status"}>
             <CloseCircleOutlined aria-hidden />
@@ -287,17 +302,20 @@ export default function App() {
             </h2>
           </div>
           <div
-            className={`run-indicator ${session.isRunning || session.hitlPending ? "run-indicator--live" : ""}`}
+            className={`run-indicator run-indicator--${session.runStatus}`}
+            aria-live="polite"
           >
-            {session.hitlPending ? (
-              <span>等待 HITL 审批</span>
-            ) : session.isRunning ? (
+            {session.runStatus === "awaiting_approval" ? (
               <>
-                <BranchesOutlined aria-hidden /> 研搜中
+                <PauseCircleOutlined aria-hidden /> {runStatusLabel(session.runStatus)}
+              </>
+            ) : isLiveRun(session.runStatus) ? (
+              <>
+                <BranchesOutlined aria-hidden /> {runStatusLabel(session.runStatus)}
               </>
             ) : (
               <>
-                <CheckCircleOutlined aria-hidden /> 待命
+                <CheckCircleOutlined aria-hidden /> {runStatusLabel(session.runStatus)}
               </>
             )}
           </div>
@@ -327,8 +345,12 @@ export default function App() {
 
         {workspace === "chat" ? (
           <section className="chat-stream-panel" ref={streamRef}>
-            <EventStream events={session.events} />
-            <ConversationThread onUseExample={setQuery} turns={turns} />
+            <EventStream events={session.events} runStatus={session.runStatus} />
+            <ConversationThread
+              onUseExample={setQuery}
+              runStatus={session.runStatus}
+              turns={turns}
+            />
           </section>
         ) : null}
 
@@ -337,6 +359,7 @@ export default function App() {
 
         {workspace === "chat" ? (
           <ChatComposer
+            isAwaitingApproval={session.runStatus === "awaiting_approval"}
             isCancelling={session.isCancelling}
             isRunning={session.isRunning}
             isUploading={session.isUploading}

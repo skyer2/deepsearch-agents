@@ -13,7 +13,7 @@
 ```text
 ┌─────────────────────────────────────────────────────────────────┐
 │ 体验 / 服务                                                       │
-│  React 时间线 · FastAPI · WebSocket · /health · golden eval       │
+│  React · HITL 暂停态 · FastAPI · WebSocket · /health · eval       │
 └───────────────────────────────┬─────────────────────────────────┘
                                 │ run(task, session_id)
                                 ▼
@@ -117,3 +117,5 @@
 | 25 | MCP 从 stdio 适配层升级为 Capability Plane | [MCP_SYSTEM.md](./MCP_SYSTEM.md) |
 
 面试运维面：`GET /api/harness/capabilities` 返回当前 `graph_runtime_enabled`、`direct_worker_invoke`、fail-closed / SQL 护栏。
+
+前端：`idle / running / awaiting_approval`。HITL 时进度条与计时冻结，审批卡片吸顶，不再把 interrupt 渲染成仍在跑的无限动画。详见 `frontend/README.md`。
